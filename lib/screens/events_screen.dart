@@ -1,0 +1,308 @@
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+
+import '../models/event.dart';
+import '../services/event_service.dart';
+import '../theme_scope.dart';
+
+class EventsScreen extends StatefulWidget {
+  const EventsScreen({super.key});
+
+  @override
+  State<EventsScreen> createState() => _EventsScreenState();
+}
+
+enum _EventsScope {
+  today,
+  tomorrow,
+  all,
+}
+
+class _EventsScreenState extends State<EventsScreen> {
+  List<Event> _events = [];
+  bool _loading = true;
+  String? _error;
+  _EventsScope _scope = _EventsScope.all;
+
+  DateTime _localDayStart(DateTime dt) => DateTime(dt.year, dt.month, dt.day);
+
+  DateTime? _eventDateLocalOrNull(Event e) => DateTime.tryParse(e.eventDate)?.toLocal();
+
+  _EventsBuckets _bucketEvents(List<Event> events) {
+    final nowLocal = DateTime.now().toLocal();
+    final todayStart = _localDayStart(nowLocal);
+    final tomorrowStart = todayStart.add(const Duration(days: 1));
+    final dayAfterTomorrowStart = tomorrowStart.add(const Duration(days: 1));
+
+    final today = <Event>[];
+    final tomorrow = <Event>[];
+    final later = <Event>[];
+    final undated = <Event>[];
+
+    for (final e in events) {
+      final dtLocal = _eventDateLocalOrNull(e);
+      if (dtLocal == null) {
+        undated.add(e);
+        continue;
+      }
+
+      if (!dtLocal.isBefore(todayStart) && dtLocal.isBefore(tomorrowStart)) {
+        today.add(e);
+      } else if (!dtLocal.isBefore(tomorrowStart) && dtLocal.isBefore(dayAfterTomorrowStart)) {
+        tomorrow.add(e);
+      } else {
+        later.add(e);
+      }
+    }
+
+    int dateAsc(Event a, Event b) {
+      final da = _eventDateLocalOrNull(a);
+      final db = _eventDateLocalOrNull(b);
+      if (da == null && db == null) return 0;
+      if (da == null) return 1;
+      if (db == null) return -1;
+      return da.compareTo(db);
+    }
+
+    today.sort(dateAsc);
+    tomorrow.sort(dateAsc);
+    later.sort(dateAsc);
+    undated.sort((a, b) => a.eventTitle.compareTo(b.eventTitle));
+
+    return _EventsBuckets(
+      today: today,
+      tomorrow: tomorrow,
+      later: later,
+      undated: undated,
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final list = await getEvents();
+      setState(() {
+        _events = list;
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Widget _buildEventCard(Event e, {bool isHorizontal = false, double? width}) {
+    final date = DateTime.tryParse(e.eventDate);
+    final dateStr = date != null ? DateFormat.yMMMd().add_Hm().format(date.toLocal()) : e.eventDate;
+
+    final card = Card(
+      margin: isHorizontal ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
+      child: InkWell(
+        onTap: () => context.push('/events/${e.id}'),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (e.eventPromotionPhoto != null && e.eventPromotionPhoto!.isNotEmpty)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    e.eventPromotionPhoto!,
+                    width: 80,
+                    height: 80,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox(width: 80, height: 80, child: Icon(Icons.image_not_supported)),
+                  ),
+                )
+              else
+                const SizedBox(width: 80, height: 80, child: Icon(Icons.event)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(e.eventTitle, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
+                    const SizedBox(height: 4),
+                    Text(
+                      dateStr,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+                        fontSize: 12,
+                      ),
+                    ),
+                    if (e.city != null) Text(e.city!, style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (width == null) return card;
+    return SizedBox(width: width, child: card);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final buckets = _bucketEvents(_events);
+    final nextUpEvents = [...buckets.today, ...buckets.tomorrow];
+
+    final List<Event> verticalEvents;
+    switch (_scope) {
+      case _EventsScope.today:
+        verticalEvents = buckets.today;
+        break;
+      case _EventsScope.tomorrow:
+        verticalEvents = buckets.tomorrow;
+        break;
+      case _EventsScope.all:
+        verticalEvents = [...buckets.today, ...buckets.tomorrow, ...buckets.later, ...buckets.undated];
+        break;
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Events'),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/'),
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(ThemeScope.of(context).themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode),
+            onPressed: ThemeScope.of(context).toggleTheme,
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(_error!, textAlign: TextAlign.center),
+                      const SizedBox(height: 16),
+                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
+                    ],
+                  ),
+                )
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  child: CustomScrollView(
+                    key: const PageStorageKey('events_scroll'),
+                    slivers: [
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (nextUpEvents.isNotEmpty) ...[
+                                Text(
+                                  'Next up',
+                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                  height: 170,
+                                  child: ListView.separated(
+                                    scrollDirection: Axis.horizontal,
+                                    itemCount: nextUpEvents.length,
+                                    separatorBuilder: (_, __) => const SizedBox(width: 12),
+                                    itemBuilder: (context, i) {
+                                      final e = nextUpEvents[i];
+                                      return _buildEventCard(e, isHorizontal: true, width: 290);
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                              ],
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  ChoiceChip(
+                                    label: const Text('Today'),
+                                    selected: _scope == _EventsScope.today,
+                                    onSelected: (selected) {
+                                      if (!selected) return;
+                                      setState(() => _scope = _EventsScope.today);
+                                    },
+                                  ),
+                                  ChoiceChip(
+                                    label: const Text('Tomorrow'),
+                                    selected: _scope == _EventsScope.tomorrow,
+                                    onSelected: (selected) {
+                                      if (!selected) return;
+                                      setState(() => _scope = _EventsScope.tomorrow);
+                                    },
+                                  ),
+                                  ChoiceChip(
+                                    label: const Text('All'),
+                                    selected: _scope == _EventsScope.all,
+                                    onSelected: (selected) {
+                                      if (!selected) return;
+                                      setState(() => _scope = _EventsScope.all);
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      if (verticalEvents.isEmpty)
+                        const SliverFillRemaining(
+                          child: Center(child: Text('No events found')),
+                        )
+                      else
+                        SliverPadding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          sliver: SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (context, i) {
+                                final e = verticalEvents[i];
+                                return _buildEventCard(e);
+                              },
+                              childCount: verticalEvents.length,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+    );
+  }
+}
+
+class _EventsBuckets {
+  final List<Event> today;
+  final List<Event> tomorrow;
+  final List<Event> later;
+  final List<Event> undated;
+
+  const _EventsBuckets({
+    required this.today,
+    required this.tomorrow,
+    required this.later,
+    required this.undated,
+  });
+}
