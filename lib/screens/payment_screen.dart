@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -29,6 +30,8 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
   String? _pendingPaytrailStamp;
   String? _pendingPaytrailTransactionId;
   bool _paytrailVerifying = false;
+  Timer? _reservationTimer;
+  Duration _reservationRemaining = Duration.zero;
 
   bool get _canStripe => stripePublishableKey.isNotEmpty;
 
@@ -36,9 +39,23 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
 
   bool get _canPayNow {
     if (_loading) return false;
+    if (_isReservationExpired) return false;
     if (_useStripe && _canStripe) return _cardComplete;
     if (_canPaytrail) return true;
     return false;
+  }
+
+  bool get _isReservationExpired {
+    final expiresAt = widget.payload.reservationExpiresAtMs;
+    if (expiresAt == null) return false;
+    return DateTime.now().millisecondsSinceEpoch >= expiresAt;
+  }
+
+  String _formatDuration(Duration d) {
+    final totalSeconds = d.inSeconds < 0 ? 0 : d.inSeconds;
+    final mins = totalSeconds ~/ 60;
+    final secs = totalSeconds % 60;
+    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -51,12 +68,40 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
         if (mounted) setState(() => _stripeInitialized = true);
       });
     }
+    _startReservationCountdown();
   }
 
   @override
   void dispose() {
+    _reservationTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _startReservationCountdown() {
+    final expiresAt = widget.payload.reservationExpiresAtMs;
+    if (expiresAt == null) return;
+    _reservationTimer?.cancel();
+    _reservationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final remainingMs = expiresAt - DateTime.now().millisecondsSinceEpoch;
+      setState(() {
+        _reservationRemaining = Duration(milliseconds: remainingMs > 0 ? remainingMs : 0);
+        if (remainingMs <= 0) {
+          _error = 'Reservation expired. Please go back and select seats again.';
+        }
+      });
+      if (remainingMs <= 0) {
+        _reservationTimer?.cancel();
+      }
+    });
+    final initialRemaining = expiresAt - DateTime.now().millisecondsSinceEpoch;
+    setState(() {
+      _reservationRemaining = Duration(milliseconds: initialRemaining > 0 ? initialRemaining : 0);
+      if (initialRemaining <= 0) {
+        _error = 'Reservation expired. Please go back and select seats again.';
+      }
+    });
   }
 
   @override
@@ -87,6 +132,7 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
       'sessionId': widget.payload.sessionId,
       'seats': widget.payload.placeIds,
       'placeIds': widget.payload.placeIds,
+      'sectionSelections': widget.payload.sectionSelections,
       'seatTickets': widget.payload.seatTickets,
       'amount': widget.payload.totalCents,
       'currency': widget.payload.currency.toUpperCase(),
@@ -170,6 +216,7 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
         vatRate: widget.payload.vat,
         sessionId: widget.payload.sessionId,
         placeIds: widget.payload.placeIds,
+        sectionSelections: widget.payload.sectionSelections,
         seatTickets: widget.payload.seatTickets,
         country: widget.payload.country,
         fullName: widget.payload.fullName,
@@ -203,6 +250,7 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
         externalMerchantId: widget.payload.externalMerchantId,
         sessionId: widget.payload.sessionId,
         placeIds: widget.payload.placeIds,
+        sectionSelections: widget.payload.sectionSelections,
         seatTickets: widget.payload.seatTickets,
       );
       if (!mounted) return;
@@ -255,6 +303,7 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
         vatRate: widget.payload.vat,
         sessionId: widget.payload.sessionId,
         placeIds: widget.payload.placeIds,
+        sectionSelections: widget.payload.sectionSelections,
         seatTickets: widget.payload.seatTickets,
         country: widget.payload.country,
         fullName: widget.payload.fullName,
@@ -305,6 +354,16 @@ class _PaymentScreenState extends State<PaymentScreen> with WidgetsBindingObserv
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Total: ${formatPrice(total, widget.payload.currency)}', style: theme.textTheme.titleLarge),
+            if (widget.payload.reservationExpiresAtMs != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Reservation expires in ${_formatDuration(_reservationRemaining)}',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: _reservationRemaining.inSeconds <= 60 ? theme.colorScheme.error : theme.colorScheme.primary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
             if (_error != null) ...[
               const SizedBox(height: 16),
               Text(_error!, style: TextStyle(color: theme.colorScheme.error)),

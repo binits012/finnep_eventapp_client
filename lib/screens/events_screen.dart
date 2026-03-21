@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../models/event.dart';
 import '../services/event_service.dart';
 import '../theme_scope.dart';
+import '../utils/currency.dart';
 
 class EventsScreen extends StatefulWidget {
   const EventsScreen({super.key});
@@ -25,9 +26,53 @@ class _EventsScreenState extends State<EventsScreen> {
   String? _error;
   _EventsScope _scope = _EventsScope.all;
 
+  bool _eventIsFree(Event e) {
+    if (e.ticketInfo.isEmpty) return true;
+    return e.ticketInfo.every((t) => t.price == 0);
+  }
+
+  String _eventPriceLabel(Event e) {
+    if (_eventIsFree(e)) return 'Free';
+    if (e.ticketInfo.isEmpty) return '';
+    final minPrice = e.ticketInfo.map((t) => t.price).reduce((a, b) => a < b ? a : b);
+    final currency = currencyFromCountry(e.country);
+    return 'From ${formatPrice(minPrice, currency)}';
+  }
+
+  Widget _priceChip(BuildContext context, Event event, {double fontSize = 12}) {
+    if (event.hasSeatSelection) return const SizedBox.shrink();
+    final label = _eventPriceLabel(event);
+    if (label.isEmpty) return const SizedBox.shrink();
+    final isFree = _eventIsFree(event);
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: fontSize > 11 ? 8 : 6, vertical: fontSize > 11 ? 4 : 2),
+      decoration: BoxDecoration(
+        color: isFree ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.secondaryContainer,
+        borderRadius: BorderRadius.circular(fontSize > 11 ? 8 : 6),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: fontSize,
+          fontWeight: FontWeight.w600,
+          color: isFree ? Theme.of(context).colorScheme.onPrimaryContainer : Theme.of(context).colorScheme.onSecondaryContainer,
+        ),
+      ),
+    );
+  }
+
   DateTime _localDayStart(DateTime dt) => DateTime(dt.year, dt.month, dt.day);
 
   DateTime? _eventDateLocalOrNull(Event e) => DateTime.tryParse(e.eventDate)?.toLocal();
+  DateTime? _eventEndDateLocalOrNull(Event e) =>
+      e.eventEndDate == null ? null : DateTime.tryParse(e.eventEndDate!)?.toLocal();
+
+  bool _isEventActiveNow(Event e, DateTime nowLocal) {
+    final start = _eventDateLocalOrNull(e);
+    if (start == null) return false;
+    final end = _eventEndDateLocalOrNull(e) ?? start;
+    return !start.isAfter(nowLocal) && !end.isBefore(nowLocal);
+  }
 
   _EventsBuckets _bucketEvents(List<Event> events) {
     final nowLocal = DateTime.now().toLocal();
@@ -44,6 +89,12 @@ class _EventsScreenState extends State<EventsScreen> {
       final dtLocal = _eventDateLocalOrNull(e);
       if (dtLocal == null) {
         undated.add(e);
+        continue;
+      }
+
+      // Running multi-day events belong to "today" while active.
+      if (_isEventActiveNow(e, nowLocal)) {
+        today.add(e);
         continue;
       }
 
@@ -106,6 +157,8 @@ class _EventsScreenState extends State<EventsScreen> {
   Widget _buildEventCard(Event e, {bool isHorizontal = false, double? width}) {
     final date = DateTime.tryParse(e.eventDate);
     final dateStr = date != null ? DateFormat.yMMMd().add_Hm().format(date.toLocal()) : e.eventDate;
+    final venueName = e.venue?.name ?? e.venueInfo?.name;
+    final secondary = Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7);
 
     final card = Card(
       margin: isHorizontal ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
@@ -135,16 +188,65 @@ class _EventsScreenState extends State<EventsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(e.eventTitle, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
-                    const SizedBox(height: 4),
-                    Text(
-                      dateStr,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
-                        fontSize: 12,
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            e.eventTitle,
+                            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _priceChip(context, e, fontSize: isHorizontal ? 10 : 12),
+                      ],
                     ),
-                    if (e.city != null) Text(e.city!, style: const TextStyle(fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(Icons.schedule, size: 12, color: secondary),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            dateStr,
+                            style: TextStyle(color: secondary, fontSize: 12),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (venueName != null && venueName.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          Icon(Icons.place, size: 12, color: secondary),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              venueName,
+                              style: TextStyle(color: secondary, fontSize: 12),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (e.eventLocationAddress != null && e.eventLocationAddress!.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        e.eventLocationAddress!,
+                        style: TextStyle(color: secondary, fontSize: 11),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    if (e.city != null && e.city!.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(e.city!, style: TextStyle(color: secondary, fontSize: 12)),
+                    ],
                   ],
                 ),
               ),

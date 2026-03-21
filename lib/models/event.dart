@@ -5,6 +5,7 @@ class Event {
   final String eventTitle;
   final String? eventDescription;
   final String eventDate;
+  final String? eventEndDate;
   final String? eventPromotionPhoto;
   final String? status;
   final VenueInfo? venueInfo;
@@ -21,6 +22,7 @@ class Event {
   final String? videoUrl;
   final String? transportLink;
   final String? eventLocationGeoCode;
+  final bool? isSeatedEventFromApi;
   final bool? hasSeatSelectionFromApi;
   final Map<String, dynamic>? waitlistConfig;
   final int? preSaleWaitlistCount;
@@ -32,6 +34,7 @@ class Event {
     required this.eventTitle,
     this.eventDescription,
     required this.eventDate,
+    this.eventEndDate,
     this.eventPromotionPhoto,
     this.status,
     this.venueInfo,
@@ -48,6 +51,7 @@ class Event {
     this.videoUrl,
     this.transportLink,
     this.eventLocationGeoCode,
+    this.isSeatedEventFromApi,
     this.hasSeatSelectionFromApi,
     this.waitlistConfig,
     this.preSaleWaitlistCount,
@@ -74,6 +78,7 @@ class Event {
       eventTitle: _str(json['eventTitle']) ?? '',
       eventDescription: _str(json['eventDescription']),
       eventDate: _str(json['eventDate']) ?? '',
+      eventEndDate: _str(json['eventEndDate']) ?? _str(json['event_end_date']),
       eventPromotionPhoto: _str(json['eventPromotionPhoto']),
       status: _str(json['status']),
       venueInfo: _mapFrom(json['venueInfo'])?._let(VenueInfo.fromJson),
@@ -90,7 +95,8 @@ class Event {
       videoUrl: _str(json['videoUrl']),
       transportLink: _str(json['transportLink']),
       eventLocationGeoCode: _str(json['eventLocationGeoCode']),
-      hasSeatSelectionFromApi: json['hasSeatSelection'] == true,
+      isSeatedEventFromApi: _boolOrNull(json, 'isSeatedEvent'),
+      hasSeatSelectionFromApi: _boolOrNull(json, 'hasSeatSelection'),
       waitlistConfig: _mapFrom(json['waitlistConfig']),
       preSaleWaitlistCount: (json['pre_sale_waitlist_count'] is num) ? (json['pre_sale_waitlist_count'] as num).toInt() : null,
       preSaleWaitlistCap: (json['pre_sale_waitlist_cap'] is num) ? (json['pre_sale_waitlist_cap'] as num).toInt() : null,
@@ -101,9 +107,11 @@ class Event {
   /// Aligns with web (test.okazzo.eu): venue.venueId / lockedManifestId / pricing_configuration.
   /// Also uses root-level hasSeatSelection if API sends it.
   bool get hasSeatSelection {
+    if (isSeatedEventFromApi != null) return isSeatedEventFromApi == true;
     if (hasSeatSelectionFromApi == true) return true;
     final v = venue;
     if (v == null) return false;
+    if ((v.manifestVersion ?? 0) > 0) return true;
     if (v.venueId != null && v.venueId!.trim().isNotEmpty) return true;
     if (v.lockedManifestId != null && v.lockedManifestId!.trim().isNotEmpty) return true;
     if (v.hasSeatSelection == true) return true;
@@ -158,6 +166,13 @@ Map<String, dynamic>? _mapFrom(dynamic v) {
   return null;
 }
 
+bool? _boolOrNull(Map<String, dynamic> json, String key) {
+  if (!json.containsKey(key)) return null;
+  final value = json[key];
+  if (value is bool) return value;
+  return null;
+}
+
 extension _Let<T> on T {
   R _let<R>(R Function(T) f) => f(this);
 }
@@ -182,6 +197,7 @@ class Venue {
   final bool? hasSeatSelection;
   final String? lockedManifestId;
   final String? pricingModel;
+  final int? manifestVersion;
 
   Venue({
     this.name,
@@ -189,6 +205,7 @@ class Venue {
     this.hasSeatSelection,
     this.lockedManifestId,
     this.pricingModel,
+    this.manifestVersion,
   });
 
   factory Venue.fromJson(Map<String, dynamic> json) => Venue(
@@ -197,6 +214,7 @@ class Venue {
         hasSeatSelection: json['hasSeatSelection'] == true,
         lockedManifestId: _str(json['lockedManifestId']),
         pricingModel: _str(json['pricingModel']),
+        manifestVersion: (json['manifestVersion'] is num) ? (json['manifestVersion'] as num).toInt() : null,
       );
 }
 
@@ -214,6 +232,10 @@ class TicketInfo {
   final String name;
   final double price;
   final int quantity;
+  /// For recurring/season passes:
+  /// total number of entries/scans allowed for a single purchased pass (QR).
+  /// When present (>0), checkout should lock quantity to `1`.
+  final int? scanCount;
   final int? available;
   final double? serviceFee;
   final double? entertainmentTax;
@@ -227,6 +249,7 @@ class TicketInfo {
     required this.name,
     required this.price,
     this.quantity = 1,
+    this.scanCount,
     this.available,
     this.serviceFee,
     this.entertainmentTax,
@@ -241,6 +264,13 @@ class TicketInfo {
         name: _str(json['name']) ?? '',
         price: _toDouble(json['price']) ?? 0,
         quantity: (json['quantity'] is num) ? (json['quantity'] as num).toInt() : 1,
+    scanCount: (json['scanCount'] is num)
+        ? (json['scanCount'] as num).toInt()
+        : (json['scan_count'] is num)
+            ? (json['scan_count'] as num).toInt()
+            : (json['scanCount'] != null || json['scan_count'] != null)
+                ? int.tryParse((json['scanCount'] ?? json['scan_count']).toString())
+                : null,
         available: (json['available'] is num) ? (json['available'] as num).toInt() : null,
         serviceFee: _toDouble(json['serviceFee']),
         entertainmentTax: _toDouble(json['entertainmentTax']),

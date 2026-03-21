@@ -21,9 +21,11 @@ class CheckoutPayload {
   final String currency;
   final bool paytrailEnabled;
   final List<String>? placeIds;
+  final List<Map<String, dynamic>>? sectionSelections;
   final List<Map<String, dynamic>>? seatTickets;
   final String? sessionId;
   final String? country;
+  final int? reservationExpiresAtMs;
   /// When set (e.g. from ticket.totalPerTicket * qty), amount uses this so backend match succeeds.
   final double? totalAmountOverride;
   final double? finalPricePerTicket;
@@ -47,9 +49,11 @@ class CheckoutPayload {
     this.currency = 'eur',
     this.paytrailEnabled = false,
     this.placeIds,
+    this.sectionSelections,
     this.seatTickets,
     this.sessionId,
     this.country,
+    this.reservationExpiresAtMs,
     this.totalAmountOverride,
     this.finalPricePerTicket,
   });
@@ -76,6 +80,12 @@ class CheckoutPayload {
       placeIds: (json['placeIds'] is List)
           ? (json['placeIds'] as List).map((e) => e.toString()).toList()
           : null,
+      sectionSelections: (json['sectionSelections'] is List)
+          ? (json['sectionSelections'] as List)
+              .whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList()
+          : null,
       seatTickets: (json['seatTickets'] is List)
           ? (json['seatTickets'] as List)
               .whereType<Map>()
@@ -84,6 +94,7 @@ class CheckoutPayload {
           : null,
       sessionId: json['sessionId']?.toString(),
       country: json['country']?.toString(),
+      reservationExpiresAtMs: (json['reservationExpiresAtMs'] as num?)?.toInt(),
       totalAmountOverride: (json['totalAmountOverride'] as num?)?.toDouble(),
       finalPricePerTicket: (json['finalPricePerTicket'] as num?)?.toDouble(),
     );
@@ -135,9 +146,11 @@ String toString() {
     'currency: $currency, '
     'paytrailEnabled: $paytrailEnabled, '
     'placeIds: $placeIds, '
+    'sectionSelections: $sectionSelections, '
     'seatTickets: $seatTickets, '
     'sessionId: $sessionId, '
     'country: $country, '
+    'reservationExpiresAtMs: $reservationExpiresAtMs, '
     'totalAmountOverride: $totalAmountOverride, '
     'totalCents: $totalCents, '
     'finalPricePerTicket: $finalPricePerTicket'
@@ -164,9 +177,11 @@ String toString() {
       'currency': currency,
       'paytrailEnabled': paytrailEnabled,
       'placeIds': placeIds,
+      'sectionSelections': sectionSelections,
       'seatTickets': seatTickets,
       'sessionId': sessionId,
       'country': country,
+      'reservationExpiresAtMs': reservationExpiresAtMs,
       'totalAmountOverride': totalAmountOverride,
       'totalCents': totalCents,
       'finalPricePerTicket': finalPricePerTicket,

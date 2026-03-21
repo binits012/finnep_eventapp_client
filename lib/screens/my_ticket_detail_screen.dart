@@ -30,6 +30,24 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     return double.tryParse(s);
   }
 
+  String _formatMoney(double? amount, String currency) {
+    if (amount == null) return '';
+    final c = currency.trim().isNotEmpty ? currency.trim() : 'EUR';
+    return '${amount.toStringAsFixed(3)} $c';
+  }
+
+  double? _resolveVatAmount(dynamic basePriceRaw, dynamic taxRaw) {
+    final base = _toDouble(basePriceRaw);
+    final tax = _toDouble(taxRaw);
+    if (tax == null) return null;
+    if (base == null) return tax;
+    // tax can be either percent (e.g. 13.5) or already a money amount.
+    if (tax >= 0 && tax <= 100) {
+      return base * (tax / 100);
+    }
+    return tax;
+  }
+
   String _formatDateReadable(String? raw) {
     if (raw == null) return '';
     final v = raw.trim();
@@ -39,6 +57,14 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     // Prefer date-only display unless time is present.
     final hasTime = v.contains('T') || v.contains(':');
     return hasTime ? DateFormat.yMMMd().add_jm().format(dt) : DateFormat.yMMMd().format(dt);
+  }
+
+  bool _isEventEnded(GuestTicket t) {
+    final eventEndRaw = _extractField(t.raw, ['eventEndDate', 'event_end_date', 'eventDate']);
+    if (eventEndRaw.isEmpty) return false;
+    final eventEnd = DateTime.tryParse(eventEndRaw);
+    if (eventEnd == null) return false;
+    return eventEnd.toLocal().isBefore(DateTime.now().toLocal());
   }
 
   String _extractField(Map<String, dynamic>? raw, List<String> keys) {
@@ -95,6 +121,20 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     return '$section · Row ${first.row} · Seat ${first.seat} (+${decoded.length - 1} more)';
   }
 
+  String _sectionSelectionsLabel(dynamic sectionSelectionsRaw) {
+    if (sectionSelectionsRaw is! List) return '';
+    final labels = <String>[];
+    for (final item in sectionSelectionsRaw) {
+      if (item is! Map) continue;
+      final sectionName = (item['sectionName'] ?? item['name'] ?? item['sectionId'] ?? '').toString().trim();
+      final qty = (item['quantity'] ?? '').toString().trim();
+      if (sectionName.isEmpty) continue;
+      labels.add(qty.isNotEmpty ? '$sectionName x$qty' : sectionName);
+    }
+    if (labels.isEmpty) return '';
+    return labels.join(' · ');
+  }
+
   @override
   void initState() {
     super.initState();
@@ -118,6 +158,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     final qrPayload = extractedQrPayload.trim().isNotEmpty ? extractedQrPayload.trim() : t.id.trim();
     if (qrPayload.isEmpty) return const SizedBox.shrink();
 
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -125,7 +166,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.08),
+            color: scheme.shadow.withValues(alpha: 0.12),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -208,9 +249,14 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     final seat = _extractField(t.raw, ['seat', 'seatNumber', 'seatNo']);
     final mappedSeatingLabel = [section, row, seat].where((x) => x.isNotEmpty).join(' · ');
     final placeIdsRaw = t.raw?['placeIds'] ?? t.raw?['_clientPlaceIds'];
+    final sectionSelectionsRaw = t.raw?['sectionSelections'] ??
+        (t.raw?['ticketInfo'] is Map ? (t.raw?['ticketInfo']?['sectionSelections']) : null);
     String seatingLabel = mappedSeatingLabel.isNotEmpty
         ? mappedSeatingLabel
         : _seatLabelFromPlaceIds(placeIdsRaw);
+    if (seatingLabel.isEmpty) {
+      seatingLabel = _sectionSelectionsLabel(sectionSelectionsRaw);
+    }
 
     final extractedQrPayload = _extractField(
       t.raw,
@@ -269,6 +315,12 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     String serviceFeeStr = usedModelServiceFee
         ? (t.serviceFee ?? '').trim()
         : _extractField(t.raw, ['serviceFee', 'totalServiceFee', 'service_fee', 'ticketServiceFee']);
+    String vatStr = _extractField(t.raw, [
+      'vatAmount',
+      'totalVatAmount',
+      'taxAmount',
+      'entertainmentTaxAmount',
+    ]);
     String totalStr = usedModelTotalAmount
         ? (t.totalAmount ?? '').trim()
         : _extractField(t.raw, [
@@ -279,12 +331,13 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
             'grandTotal',
             'totalPaidAmount',
           ]);
-    bool showPricing = priceStr.isNotEmpty || serviceFeeStr.isNotEmpty || totalStr.isNotEmpty;
+    bool showPricing = priceStr.isNotEmpty || serviceFeeStr.isNotEmpty || vatStr.isNotEmpty || totalStr.isNotEmpty;
 
     // If seat tickets exist, compute price/service fee/total from their per-seat pricing.
     if (seatTickets.isNotEmpty) {
       double totalBasePrice = 0;
       double totalServiceFee = 0;
+      double totalVatAmount = 0;
       double totalAmount = 0;
       bool hasAnySeatLevelPricing = false;
 
@@ -301,29 +354,32 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
         hasAnySeatLevelPricing = true;
 
         final basePrice = _toDouble(pricing['basePrice'] ?? pricing['unitPrice']) ?? 0;
-        final taxPct = _toDouble(pricing['tax'] ?? pricing['vat']) ?? 0;
+        final vatAmount = _resolveVatAmount(pricing['basePrice'] ?? pricing['unitPrice'], pricing['tax'] ?? pricing['vat']) ?? 0;
         final serviceFee = _toDouble(pricing['serviceFee']) ?? 0;
-        final serviceTaxPct = _toDouble(pricing['serviceTax']) ?? 0;
-        final orderFee = _toDouble(pricing['orderFee']) ?? 0;
 
         totalBasePrice += basePrice;
         totalServiceFee += serviceFee;
+        totalVatAmount += vatAmount;
 
-        final baseTaxAmount = basePrice * (taxPct / 100);
-        final serviceTaxAmount = serviceFee * (serviceTaxPct / 100);
-        final orderFeeTaxAmount = orderFee * (serviceTaxPct / 100);
-
-        totalAmount += (basePrice + baseTaxAmount + serviceFee + serviceTaxAmount + orderFee + orderFeeTaxAmount);
+        totalAmount += (basePrice + vatAmount + serviceFee);
       }
 
       // If backend didn't provide per-seat pricing (pricing=null), fall back to the aggregate values.
       if (hasAnySeatLevelPricing) {
         priceStr = totalBasePrice.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
         serviceFeeStr = totalServiceFee.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
+        vatStr = totalVatAmount.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
         totalStr = totalAmount.toStringAsFixed(2);
         showPricing = totalAmount > 0 || showPricing;
       }
     }
+
+    final priceNum = _toDouble(priceStr);
+    final serviceFeeNum = _toDouble(serviceFeeStr);
+    final vatNum = _toDouble(vatStr);
+    final totalNum = _toDouble(totalStr);
+    final isFreeTicket = [priceNum, serviceFeeNum, vatNum, totalNum].every((v) => v == null || v == 0);
+    final isEventEnded = _isEventEnded(t);
 
     if (kDebugMode) {
       final placeIdsSample = placeIdsRaw is List && placeIdsRaw.isNotEmpty
@@ -373,12 +429,30 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
           children: [
             if (t.eventTitle != null && t.eventTitle!.isNotEmpty) Text(t.eventTitle!, style: Theme.of(context).textTheme.titleLarge),
             if (t.venue != null && t.venue!.isNotEmpty) Text(t.venue!, style: Theme.of(context).textTheme.bodySmall),
+            if (isEventEnded)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    'Past event',
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onErrorContainer,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
             if (t.ticketFor != null && t.ticketFor!.isNotEmpty) Text('Ticket for: ${t.ticketFor!}'),
             if (seatingLabel.isNotEmpty) Text(seatingLabel, style: Theme.of(context).textTheme.bodySmall),
             if (seatingLabel.isEmpty && (t.ticketName != null && t.ticketName!.isNotEmpty))
               Text(t.ticketName!, style: Theme.of(context).textTheme.bodySmall),
             const SizedBox(height: 24),
-            Text('Ticket details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+            Text('Payment details', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(16),
@@ -398,13 +472,53 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
                     seatingLabel.isNotEmpty ? seatingLabel : (t.ticketName ?? ''),
                   ),
                   _infoRow(context, 'Attendee', t.ticketFor ?? ''),
+                  _infoRow(context, 'Ticket', t.ticketName ?? ''),
                   _infoRow(context, 'Qty', t.quantity ?? ''),
                   _infoRow(context, 'Order', t.orderId ?? ''),
                   if (entryCode.isNotEmpty) _infoRow(context, 'Entry code', entryCode),
                   _infoRow(context, 'Purchased', _formatDateReadable(t.purchaseDate)),
                   if (showPricing) ...[
                     const Divider(height: 24),
-                    Text('Pricing', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
+                    if (isFreeTicket) ...[
+                      _infoRow(context, 'Pricing', 'Free Ticket'),
+                    ] else ...[
+                    if (seatTickets.isNotEmpty) ...[
+                      Text(
+                        'Ticket line items',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 8),
+                      ...seatTickets.asMap().entries.map((entry) {
+                        final index = entry.key;
+                        final st = entry.value;
+                        final pricingRaw = st['pricing'];
+                        final pricing = pricingRaw is Map ? Map<String, dynamic>.from(pricingRaw) : <String, dynamic>{};
+                        final lineCurrency = (pricing['currency']?.toString() ?? currency).trim();
+                        final lineBase = _toDouble(pricing['basePrice'] ?? pricing['unitPrice']);
+                        final lineServiceFee = _toDouble(pricing['serviceFee']);
+                        final lineVat = _resolveVatAmount(pricing['basePrice'] ?? pricing['unitPrice'], pricing['tax'] ?? pricing['vat']);
+                        final lineName = (st['ticketName'] ?? '').toString().trim();
+
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Theme.of(context).dividerColor),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(lineName.isNotEmpty ? lineName : 'Ticket ${index + 1}', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+                              _infoRow(context, 'Price', _formatMoney(lineBase, lineCurrency)),
+                              _infoRow(context, 'Service fee', _formatMoney(lineServiceFee, lineCurrency)),
+                              _infoRow(context, 'VAT', _formatMoney(lineVat, lineCurrency)),
+                            ],
+                          ),
+                        );
+                      }),
+                      const SizedBox(height: 8),
+                    ],
                     _infoRow(
                       context,
                       'Price',
@@ -417,9 +531,15 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
                     ),
                     _infoRow(
                       context,
+                      'VAT',
+                      vatStr.isNotEmpty ? '${vatStr}${currency.isNotEmpty ? ' $currency' : ''}' : '',
+                    ),
+                    _infoRow(
+                      context,
                       'Total',
                       totalStr.isNotEmpty ? '${totalStr}${currency.isNotEmpty ? ' $currency' : ''}' : '',
                     ),
+                    ],
                   ],
                   if ((t.paymentMethod ?? '').isNotEmpty) ...[
                     const SizedBox(height: 8),

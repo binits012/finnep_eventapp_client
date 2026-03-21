@@ -91,23 +91,36 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  static bool _isFuture(String dateStr) {
-    final d = DateTime.tryParse(dateStr);
-    if (d == null) return false;
-    return d.isAfter(DateTime.now());
+  static DateTime? _parseLocal(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    return DateTime.tryParse(raw)?.toLocal();
   }
 
-  static bool _isToday(String dateStr, String? tz) {
-    final d = DateTime.tryParse(dateStr);
-    if (d == null) return false;
-    final now = DateTime.now();
-    return d.year == now.year && d.month == now.month && d.day == now.day;
+  static bool _isFutureStart(Event e) {
+    final start = _parseLocal(e.eventDate);
+    if (start == null) return false;
+    return start.isAfter(DateTime.now().toLocal());
+  }
+
+  static bool _isTodayStart(Event e) {
+    final start = _parseLocal(e.eventDate);
+    if (start == null) return false;
+    final now = DateTime.now().toLocal();
+    return start.year == now.year && start.month == now.month && start.day == now.day;
+  }
+
+  static bool _isActiveNow(Event e) {
+    final now = DateTime.now().toLocal();
+    final start = _parseLocal(e.eventDate);
+    if (start == null) return false;
+    final end = _parseLocal(e.eventEndDate) ?? start;
+    return !start.isAfter(now) && !end.isBefore(now);
   }
 
   List<Event> get _featured {
     return _events
         .where((e) =>
-            e.featured?.isFeatured == true && _isFuture(e.eventDate))
+            e.featured?.isFeatured == true && _isFutureStart(e))
         .toList()
       ..sort((a, b) => (b.featured?.priority ?? 0).compareTo(a.featured?.priority ?? 0));
   }
@@ -117,7 +130,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return _events
         .where((e) =>
             !featuredIds.contains(e.id) &&
-            (_isToday(e.eventDate, e.eventTimezone) || e.status == 'on-going'))
+            (_isTodayStart(e) || _isActiveNow(e) || e.status == 'on-going'))
         .toList()
       ..sort((a, b) => a.eventDate.compareTo(b.eventDate));
   }
@@ -129,7 +142,7 @@ class _HomeScreenState extends State<HomeScreen> {
         .where((e) =>
             !featuredIds.contains(e.id) &&
             !todayIds.contains(e.id) &&
-            _isFuture(e.eventDate))
+            _isFutureStart(e))
         .toList()
       ..sort((a, b) => a.eventDate.compareTo(b.eventDate));
   }
@@ -182,7 +195,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           const SizedBox(height: 24),
                         ],
                         if (_today.isNotEmpty) ...[
-                          const Text("Today's events", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                          const Text('Happening today', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 8),
                           _EventList(events: _today),
                           const SizedBox(height: 24),

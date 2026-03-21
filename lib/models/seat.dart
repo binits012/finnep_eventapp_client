@@ -45,6 +45,7 @@ class SeatMapData {
   final List<String> sold;
   final List<String> reserved;
   final List<SectionModel> sections;
+  final List<AreaSectionModel> areaSections;
   final dynamic backgroundSvg;
   final List<PricingZone> pricingZones;
   final PricingConfig? pricingConfig;
@@ -55,6 +56,7 @@ class SeatMapData {
     required this.sold,
     required this.reserved,
     required this.sections,
+    this.areaSections = const [],
     this.backgroundSvg,
     this.pricingZones = const [],
     this.pricingConfig,
@@ -69,6 +71,10 @@ class SeatMapData {
     final sections = sectionsList
         .map((e) => SectionModel.fromJson(e as Map<String, dynamic>))
         .toList();
+    final areaSectionsList = json['areaSections'] as List<dynamic>? ?? [];
+    final areaSections = areaSectionsList
+        .map((e) => AreaSectionModel.fromJson(e as Map<String, dynamic>))
+        .toList();
     final zonesList = json['pricingZones'] as List<dynamic>? ?? [];
     final pricingZones = zonesList
         .map((e) => PricingZone.fromJson(e as Map<String, dynamic>))
@@ -82,10 +88,49 @@ class SeatMapData {
       sold: sold,
       reserved: reserved,
       sections: sections,
+      areaSections: areaSections,
       backgroundSvg: json['backgroundSvg'],
       pricingZones: pricingZones,
       pricingConfig: pricingConfig,
       venue: json['venue'] as Map<String, dynamic>?,
+    );
+  }
+}
+
+class AreaSectionModel {
+  final String id;
+  final String name;
+  final String sectionType;
+  final String selectionMode;
+  final int capacity;
+  final int soldCount;
+  final int reservedCount;
+  final int availableCount;
+  final String color;
+
+  AreaSectionModel({
+    required this.id,
+    required this.name,
+    required this.sectionType,
+    required this.selectionMode,
+    required this.capacity,
+    required this.soldCount,
+    required this.reservedCount,
+    required this.availableCount,
+    required this.color,
+  });
+
+  factory AreaSectionModel.fromJson(Map<String, dynamic> json) {
+    return AreaSectionModel(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      sectionType: json['sectionType']?.toString() ?? 'Area',
+      selectionMode: json['selectionMode']?.toString() ?? 'area',
+      capacity: (json['capacity'] as num?)?.toInt() ?? 0,
+      soldCount: (json['soldCount'] as num?)?.toInt() ?? 0,
+      reservedCount: (json['reservedCount'] as num?)?.toInt() ?? 0,
+      availableCount: (json['availableCount'] as num?)?.toInt() ?? 0,
+      color: json['color']?.toString() ?? '#1976D2',
     );
   }
 }

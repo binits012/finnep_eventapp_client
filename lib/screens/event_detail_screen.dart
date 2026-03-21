@@ -53,11 +53,16 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
       final e = await getEventById(widget.eventId);
       bool hasSeatSelectionFromSeats = false;
       bool hasPricingConfig = false;
+      String effectivePricingModel = e.venue?.pricingModel ?? 'ticket_info';
       try {
         final seatData = await getEventSeats(widget.eventId);
         hasSeatSelectionFromSeats =
             seatData.placeIds.isNotEmpty || seatData.sections.isNotEmpty;
-        hasPricingConfig = seatData.pricingConfig != null;
+        final modelFromSeatData = seatData.venue?['pricingModel']?.toString().trim();
+        if (modelFromSeatData != null && modelFromSeatData.isNotEmpty) {
+          effectivePricingModel = modelFromSeatData;
+        }
+        hasPricingConfig = (effectivePricingModel == 'pricing_configuration') && seatData.pricingConfig != null;
       } catch (err, stack) {
         debugPrint('[EventDetail] seats API failed: $err');
         debugPrint('[EventDetail] stack: $stack');
@@ -136,10 +141,13 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
       return;
     }
     if (_selectedTicket == null) return;
-    final currency = currencyFromCountry(event.country);
-    final qty = _selectedTicket!.price == 0 ? 1 : _quantity;
-    debugPrint('finalPricePerTicket: ${_selectedTicket!.finalPricePerTicket}');
     final selectedTicket = _selectedTicket!;
+    final isScanCountPass = (selectedTicket.scanCount ?? 0) > 0;
+    final currency = currencyFromCountry(event.country);
+    // ScanCount passes are personal season/recurring passes: force qty=1 per purchase.
+    final qty = isScanCountPass ? 1 : (selectedTicket.price == 0 ? 1 : _quantity);
+    debugPrint('finalPricePerTicket: ${_selectedTicket!.finalPricePerTicket}');
+    debugPrint('[Checkout] isScanCountPass=$isScanCountPass qty=$qty');
     final effectiveBaseTaxRate =
         (selectedTicket.entertainmentTax != null &&
                 (selectedTicket.entertainmentTax ?? 0) > 0)
@@ -194,6 +202,7 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
       );
     }
     final event = _event!;
+    final bool isScanCountPass = (_selectedTicket?.scanCount ?? 0) > 0;
     final waitlistOffer = event.waitlistOffer;
     final isPreSaleFull = event.isPreSaleWaitlistFull;
     final date = DateTime.tryParse(event.eventDate);
@@ -344,7 +353,10 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
                     groupValue: _selectedTicket,
                     onTap: () => setState(() {
                       _selectedTicket = t;
-                      if (t.price == 0) _quantity = 1;
+                      final isScanCountPass = (t.scanCount ?? 0) > 0;
+                      if (t.price == 0 || isScanCountPass) {
+                        _quantity = 1;
+                      }
                     }),
                   )),
               if (_selectedTicket != null && _selectedTicket!.price > 0) ...[
@@ -354,12 +366,14 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
                     const Text('Quantity: '),
                     IconButton(
                       icon: const Icon(Icons.remove),
-                      onPressed: _quantity > 1 ? () => setState(() => _quantity--) : null,
+                      onPressed: !isScanCountPass && _quantity > 1
+                          ? () => setState(() => _quantity--)
+                          : null,
                     ),
-                    Text('$_quantity'),
+                    Text(isScanCountPass ? '1' : '$_quantity'),
                     IconButton(
                       icon: const Icon(Icons.add),
-                      onPressed: () => setState(() => _quantity++),
+                      onPressed: isScanCountPass ? null : () => setState(() => _quantity++),
                     ),
                   ],
                 ),

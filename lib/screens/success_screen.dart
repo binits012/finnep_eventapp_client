@@ -210,13 +210,11 @@ class _SuccessScreenState extends State<SuccessScreen> {
     final attendee = (clientEmail.contains('@') ? clientEmail : ticketForRaw);
     // Prefer client-provided ticket name (e.g. tier name) when server sends a generic one like "New Ticket".
     final clientTicketName = _str(widget.ticketData?['_clientTicketName']);
-    // If we have seat placeIds, show section/row/seat instead of generic ticket name.
+    // Seat location label is displayed separately from ticket type.
     final clientPlaceIdsRaw = widget.ticketData?['_clientPlaceIds'];
     final clientPlaceIds = clientPlaceIdsRaw is List ? clientPlaceIdsRaw.map((e) => _str(e)).where((e) => e.isNotEmpty).toList() : const <String>[];
     final ticketSeatLabel = clientPlaceIds.isNotEmpty ? _seatLabelFromPlaceIds(clientPlaceIds) : '';
-    final ticketName = ticketSeatLabel.isNotEmpty
-        ? ticketSeatLabel
-        : (clientTicketName.isNotEmpty ? clientTicketName : ticketNameFromServer);
+    final ticketName = clientTicketName.isNotEmpty ? clientTicketName : ticketNameFromServer;
     final orderId = _field(ticket, ticketInfo, ['orderId', 'orderRef', 'reference']);
     // For your response shape, the real timestamp is `data.createdAt`.
     final purchaseDate = _field(ticket, ticketInfo, ['purchaseDate', 'createdAt', 'created']);
@@ -256,8 +254,9 @@ class _SuccessScreenState extends State<SuccessScreen> {
     debugPrint('[SuccessScreen] eventTitle="$eventTitle" eventDate="$eventDate" venue="$venue" ticketName="$ticketName"');
     debugPrint('[SuccessScreen] attendee="$attendee" orderId="$orderId" purchaseDate="$purchaseDate" totalPaid="$totalPaid"');
 
-    const labelColor = Color(0xFF616161);
-    const valueColor = Color(0xFF212121);
+    final scheme = Theme.of(context).colorScheme;
+    final labelColor = scheme.onSurfaceVariant;
+    final valueColor = scheme.onSurface;
     Widget _infoRow(String label, String value) {
       if (value.isEmpty) return const SizedBox.shrink();
       return Padding(
@@ -277,6 +276,7 @@ class _SuccessScreenState extends State<SuccessScreen> {
       if (eventDate.isNotEmpty) _infoRow('Date', eventDate),
       if (venue.isNotEmpty) _infoRow('Venue', venue),
       if (ticketName.isNotEmpty) _infoRow('Ticket', ticketName),
+      if (ticketSeatLabel.isNotEmpty) _infoRow('Seating', ticketSeatLabel),
       if (totalPaid.isNotEmpty) _infoRow('Total', totalPaid),
       if (attendee.isNotEmpty) _infoRow('Attendee', attendee.contains('@') ? _obfuscateEmail(attendee) : attendee),
       if (quantity.isNotEmpty) _infoRow('Qty', quantity),
@@ -304,23 +304,21 @@ class _SuccessScreenState extends State<SuccessScreen> {
               child: Text(
                 'Payment successful',
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.black87,
-                ),
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: scheme.onSurface),
               ),
             ),
             const SizedBox(height: 16),
-            if (infoChildren.isNotEmpty)
+            if (infoChildren.isNotEmpty || qrPayload.isNotEmpty)
               RepaintBoundary(
                 key: _ticketKey,
                 child: Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: scheme.surface,
                     borderRadius: BorderRadius.circular(12),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.08),
+                        color: scheme.shadow.withValues(alpha: 0.12),
                         blurRadius: 8,
                         offset: const Offset(0, 2),
                       ),
@@ -329,45 +327,38 @@ class _SuccessScreenState extends State<SuccessScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: infoChildren,
-                  ),
-                ),
-              ),
-            if (qrPayload.isNotEmpty) ...[
-              const SizedBox(height: 24),
-              Center(
-                child: Text(
-                  'Your ticket',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Theme.of(context).brightness == Brightness.dark ? Colors.white : Colors.black87,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.08),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
+                    children: [
+                      if (infoChildren.isNotEmpty) ...infoChildren,
+                      if (qrPayload.isNotEmpty) ...[
+                        const SizedBox(height: 24),
+                        Center(
+                          child: Text(
+                            'Your ticket',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(color: scheme.onSurface),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Center(
+                          child: Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: QrImageView(
+                              data: qrPayload,
+                              version: QrVersions.auto,
+                              size: 200,
+                              backgroundColor: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
-                  child: QrImageView(
-                    data: qrPayload,
-                    version: QrVersions.auto,
-                    size: 200,
-                    backgroundColor: Colors.white,
-                  ),
                 ),
               ),
-            ],
             const SizedBox(height: 32),
             ElevatedButton.icon(
               onPressed: qrPayload.isNotEmpty && !_downloading ? _downloadTicket : null,

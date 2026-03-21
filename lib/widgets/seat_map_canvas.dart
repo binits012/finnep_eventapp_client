@@ -41,6 +41,7 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
   double _contentHeight = 400;
   double _seatRadius = 4;
   Map<String, Offset> _seatPositions = const {};
+  Map<String, List<Offset>> _transformedSectionPolygons = const {};
   bool _initialFitApplied = false;
   final TransformationController _ctrl = TransformationController();
 
@@ -78,6 +79,24 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
     double maxX = double.negativeInfinity;
     double maxY = double.negativeInfinity;
     final transformed = <String, Offset>{};
+    final transformedPolygons = <String, List<Offset>>{};
+
+    // Include polygon points in bounds (standing/area has no seat x/y but has polygon).
+    for (final section in widget.sections) {
+      if (section.polygon.isEmpty) continue;
+
+      final points = <Offset>[];
+      for (final p in section.polygon) {
+        final scaled = hasAnyPolygon ? _scaledPointForSection(section, p) : Offset(p.x, p.y);
+        points.add(scaled);
+        minX = math.min(minX, scaled.dx);
+        minY = math.min(minY, scaled.dy);
+        maxX = math.max(maxX, scaled.dx);
+        maxY = math.max(maxY, scaled.dy);
+      }
+      transformedPolygons[section.id] = points;
+    }
+
     for (final s in widget.seats) {
       if (s.x != null && s.y != null) {
         final raw = _scaledSeatPosition(
@@ -110,6 +129,7 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
       _contentHeight = rangeY + 2 * _kPadding;
       _seatRadius = radius;
       _seatPositions = transformed;
+      _transformedSectionPolygons = transformedPolygons;
     });
   }
 
@@ -168,6 +188,58 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
     if ((global - 1.0).abs() > 0.001) return global.clamp(0.1, 3.0);
     final sectionScale = section?.spacingConfig?.rowSpacingVisual ?? 1.0;
     return sectionScale.clamp(0.1, 3.0);
+  }
+
+  Offset _scaledPointForSection(SectionModel section, SectionPoint p) {
+    final x = p.x;
+    final y = p.y;
+
+    final seatScale = _resolveSeatScale(section);
+    final rowScale = _resolveRowScale(section);
+    final topMargin = section.spacingConfig?.topMargin ?? 0;
+    final rotation = section.spacingConfig?.rotationAngle ?? 0;
+
+    final polygon = section.polygon;
+    if (polygon.isEmpty) return Offset(x, y);
+
+    final centerX =
+        polygon.fold<double>(0, (sum, q) => sum + q.x) / polygon.length;
+    final centerY =
+        polygon.fold<double>(0, (sum, q) => sum + q.y) / polygon.length;
+
+    if ((seatScale - 1.0).abs() < 0.001 &&
+        (rowScale - 1.0).abs() < 0.001 &&
+        rotation.abs() < 0.001 &&
+        topMargin.abs() < 0.001) {
+      return Offset(x, y);
+    }
+
+    if (rotation.abs() > 0.001) {
+      final reducedSeatScale = 0.6 + (seatScale - 1.0);
+      final reducedRowScale = 0.8 + (rowScale - 1.0);
+      final radians = rotation * math.pi / 180.0;
+      final cosA = math.cos(radians);
+      final sinA = math.sin(radians);
+
+      final offsetX = x - centerX;
+      final offsetY = y - centerY;
+
+      final localX = offsetX * cosA + offsetY * sinA;
+      final localY = -offsetX * sinA + offsetY * cosA;
+
+      final scaledLocalX = localX * reducedSeatScale;
+      final scaledLocalY = localY * reducedRowScale;
+
+      final rotatedBackX = scaledLocalX * cosA - scaledLocalY * sinA;
+      final rotatedBackY = scaledLocalX * sinA + scaledLocalY * cosA;
+
+      // Keep consistent with web/seat transform: no topMargin in rotation branch.
+      return Offset(centerX + rotatedBackX, centerY + rotatedBackY);
+    }
+
+    final scaledX = centerX + (x - centerX) * seatScale;
+    final scaledY = topMargin + centerY + (y - centerY) * rowScale;
+    return Offset(scaledX, scaledY);
   }
 
   Offset _scaledSeatPosition(
@@ -234,19 +306,66 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
   double _ty(SeatModel s) =>
       _kPadding + ((_seatPositions[s.placeId]?.dy ?? s.y ?? 0) - _minY);
 
+  int _seatRenderPriority(SeatModel s) {
+    if (widget.selectedPlaceIds.contains(s.placeId)) return 3;
+    if (s.status == SeatStatus.sold) return 2;
+    if (s.status == SeatStatus.reserved) return 1;
+    return 0;
+  }
+
+  List<SeatModel> _visibleSeatsForRendering() {
+    final clustered = <({SeatModel seat, Offset point})>[];
+    final mergeDistance = math.max(1.5, _seatRadius * 0.75);
+    final mergeDistance2 = mergeDistance * mergeDistance;
+    for (final seat in widget.seats) {
+      if (seat.x == null || seat.y == null) continue;
+      final x = _tx(seat);
+      final y = _ty(seat);
+      var merged = false;
+      for (var i = 0; i < clustered.length; i++) {
+        final entry = clustered[i];
+        final dx = entry.point.dx - x;
+        final dy = entry.point.dy - y;
+        final d2 = (dx * dx) + (dy * dy);
+        if (d2 <= mergeDistance2) {
+          // Merge effectively-overlapping dots so blocked state cannot be hidden
+          // by a nearby duplicate "available" seat.
+          final existingPriority = _seatRenderPriority(entry.seat);
+          final nextPriority = _seatRenderPriority(seat);
+          if (nextPriority >= existingPriority) {
+            clustered[i] = (seat: seat, point: Offset(x, y));
+          }
+          merged = true;
+          break;
+        }
+      }
+      if (!merged) {
+        clustered.add((seat: seat, point: Offset(x, y)));
+      }
+    }
+    return clustered.map((e) => e.seat).toList();
+  }
+
   SeatModel? _hitSeat(Offset local) {
     final r = _seatRadius * 2.5;
     final r2 = r * r;
     SeatModel? best;
     double bestD2 = r2;
-    for (final s in widget.seats) {
+    for (final s in _visibleSeatsForRendering()) {
       if (s.x == null || s.y == null) continue;
       final dx = local.dx - _tx(s);
       final dy = local.dy - _ty(s);
       final d2 = dx * dx + dy * dy;
-      if (d2 <= bestD2) {
+      if (d2 < bestD2) {
         bestD2 = d2;
         best = s;
+      } else if (d2 == bestD2 && best != null) {
+        // If two dots overlap exactly, prefer non-available status so blocked seats are not tappable.
+        final bestIsAvailable = best.status == SeatStatus.available;
+        final nextIsAvailable = s.status == SeatStatus.available;
+        if (bestIsAvailable && !nextIsAvailable) {
+          best = s;
+        }
       }
     }
     return best;
@@ -286,7 +405,8 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
   @override
   Widget build(BuildContext context) {
     final seatsWithPosition = widget.seats.where((s) => s.x != null && s.y != null).toList();
-    if (seatsWithPosition.isEmpty) {
+    final hasAnyAreaPolygon = widget.sections.any((s) => s.polygon.isNotEmpty);
+    if (seatsWithPosition.isEmpty && !hasAnyAreaPolygon) {
       return const Center(child: Text('No seat positions available'));
     }
     return LayoutBuilder(
@@ -315,10 +435,14 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
               height: _contentHeight,
               child: CustomPaint(
                 painter: _SeatMapPainter(
-                  seats: seatsWithPosition,
+                  seats: _visibleSeatsForRendering(),
                   selectedPlaceIds: widget.selectedPlaceIds.toSet(),
                   tx: _tx,
                   ty: _ty,
+                  pointTx: (x) => _kPadding + (x - _minX),
+                  pointTy: (y) => _kPadding + (y - _minY),
+                  sections: widget.sections,
+                  transformedSectionPolygons: _transformedSectionPolygons,
                   seatRadius: _seatRadius,
                   seatColor: _seatColor,
                 ),
@@ -337,6 +461,10 @@ class _SeatMapPainter extends CustomPainter {
     required this.selectedPlaceIds,
     required this.tx,
     required this.ty,
+    required this.pointTx,
+    required this.pointTy,
+    required this.sections,
+    required this.transformedSectionPolygons,
     required this.seatRadius,
     required this.seatColor,
   });
@@ -345,12 +473,25 @@ class _SeatMapPainter extends CustomPainter {
   final Set<String> selectedPlaceIds;
   final double Function(SeatModel) tx;
   final double Function(SeatModel) ty;
+  final double Function(double) pointTx;
+  final double Function(double) pointTy;
   final double seatRadius;
   final Color Function(SeatModel, bool isSelected) seatColor;
+  final List<SectionModel> sections;
+  final Map<String, List<Offset>> transformedSectionPolygons;
 
   @override
   void paint(Canvas canvas, Size size) {
-    for (final s in seats) {
+    final orderedSeats = [...seats]
+      ..sort((a, b) {
+        int priority(SeatModel seat) {
+          if (seat.status == SeatStatus.available) return 0;
+          if (seat.status == SeatStatus.reserved) return 1;
+          return 2;
+        }
+        return priority(a).compareTo(priority(b));
+      });
+    for (final s in orderedSeats) {
       final x = tx(s);
       final y = ty(s);
       final isSelected = selectedPlaceIds.contains(s.placeId);
@@ -377,6 +518,18 @@ class _SeatMapPainter extends CustomPainter {
   bool shouldRepaint(covariant _SeatMapPainter oldDelegate) {
     return oldDelegate.seats != seats ||
         oldDelegate.selectedPlaceIds != selectedPlaceIds ||
-        oldDelegate.seatRadius != seatRadius;
+        oldDelegate.seatRadius != seatRadius ||
+        oldDelegate.sections != sections ||
+        oldDelegate.transformedSectionPolygons != transformedSectionPolygons;
   }
+}
+
+Color sectionColorWithOpacity(String hexColor, double opacity) {
+  final hex = hexColor.replaceAll('#', '').trim();
+  if (hex.length != 6) return Colors.blue.withOpacity(opacity);
+  final val = int.parse(hex, radix: 16);
+  final r = (val >> 16) & 0xFF;
+  final g = (val >> 8) & 0xFF;
+  final b = val & 0xFF;
+  return Color.fromARGB((opacity * 255).round().clamp(0, 255), r, g, b);
 }

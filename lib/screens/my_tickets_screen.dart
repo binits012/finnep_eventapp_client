@@ -137,17 +137,12 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
                   children: [
                     const Text('Enter the code sent to your email'),
                     const SizedBox(height: 16),
-                    TextField(
+                    TextFormField(
+                      key: const ValueKey('my_tickets_code_input'),
                       decoration: const InputDecoration(labelText: 'Code', hintText: 'Numbers only'),
                       controller: _codeController,
-                      // Use `phone` to get a more consistent numeric keypad across iOS keyboards.
-                      keyboardType: TextInputType.phone,
+                      keyboardType: TextInputType.number,
                       inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      // Avoid autofill hints that can trigger non-numeric keyboards.
-                      autofillHints: const [],
-                      textInputAction: TextInputAction.done,
-                      enableSuggestions: false,
-                      autocorrect: false,
                     ),
                     if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                     const SizedBox(height: 16),

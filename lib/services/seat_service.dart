@@ -19,9 +19,12 @@ Future<Map<String, dynamic>> reserveSeats(
   List<String> placeIds,
   String sessionId, {
   String? email,
+  List<Map<String, dynamic>>? sectionSelections,
 }) async {
   final body = <String, dynamic>{
     'placeIds': placeIds,
+    if (sectionSelections != null && sectionSelections.isNotEmpty)
+      'sectionSelections': sectionSelections,
     'sessionId': sessionId,
     if (email != null && email.isNotEmpty) 'email': email,
   };
@@ -47,6 +50,7 @@ Future<void> sendSeatOtp(
   String email, {
   String? fullName,
   List<String>? placeIds,
+  List<Map<String, dynamic>>? sectionSelections,
   String? locale,
 }) async {
   var path = '/event/$eventId/seats/send-otp';
@@ -57,6 +61,8 @@ Future<void> sendSeatOtp(
     'email': email,
     if (fullName != null && fullName.trim().isNotEmpty) 'fullName': fullName.trim(),
     if (placeIds != null && placeIds.isNotEmpty) 'placeIds': placeIds,
+    if (sectionSelections != null && sectionSelections.isNotEmpty)
+      'sectionSelections': sectionSelections,
   };
   final response = await apiPost(path, body: body);
   throwIfNotOk(response);
@@ -67,11 +73,14 @@ Future<void> verifySeatOtp(
   String email,
   String otp, {
   List<String>? placeIds,
+  List<Map<String, dynamic>>? sectionSelections,
 }) async {
   final body = <String, dynamic>{
     'email': email,
     'otp': otp,
     if (placeIds != null && placeIds.isNotEmpty) 'placeIds': placeIds,
+    if (sectionSelections != null && sectionSelections.isNotEmpty)
+      'sectionSelections': sectionSelections,
   };
   final response = await apiPost('/event/$eventId/seats/verify-otp', body: body);
   throwIfNotOk(response);
@@ -79,10 +88,21 @@ Future<void> verifySeatOtp(
 
 double _round3(double v) => (v * 1000).round() / 1000.0;
 
+int _statusPriority(SeatStatus status) {
+  switch (status) {
+    case SeatStatus.sold:
+      return 2;
+    case SeatStatus.reserved:
+      return 1;
+    case SeatStatus.available:
+      return 0;
+  }
+}
+
 List<SeatModel> decodeSeats(SeatMapData data) {
   final soldSet = data.sold.toSet();
   final reservedSet = data.reserved.toSet();
-  final list = <SeatModel>[];
+  final byPlaceId = <String, SeatModel>{};
   // Prefer tier over zone (match web: Base 27 + Tax 3.645 = 30.645)
   for (var i = 0; i < data.placeIds.length; i++) {
     final placeId = data.placeIds[i];
@@ -133,7 +153,7 @@ List<SeatModel> decodeSeats(SeatMapData data) {
         }
       }
     }
-    list.add(SeatModel(
+    final nextSeat = SeatModel(
       placeId: placeId,
       x: decoded.x,
       y: decoded.y,
@@ -146,7 +166,15 @@ List<SeatModel> decodeSeats(SeatMapData data) {
       serviceFeeAmount: serviceFeeAmount,
       status: status,
       tags: decoded.tags,
-    ));
+    );
+    final existing = byPlaceId[placeId];
+    if (existing == null) {
+      byPlaceId[placeId] = nextSeat;
+    } else {
+      final currentPriority = _statusPriority(existing.status);
+      final nextPriority = _statusPriority(nextSeat.status);
+      byPlaceId[placeId] = nextPriority >= currentPriority ? nextSeat : existing;
+    }
   }
-  return list;
+  return byPlaceId.values.toList();
 }

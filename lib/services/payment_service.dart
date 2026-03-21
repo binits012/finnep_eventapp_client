@@ -41,6 +41,7 @@ Future<Map<String, dynamic>> createPaymentIntent({
   required double vatRate,
   String? sessionId,
   List<String>? placeIds,
+  List<Map<String, dynamic>>? sectionSelections,
   List<Map<String, dynamic>>? seatTickets,
   String? country,
   String? fullName,
@@ -103,6 +104,7 @@ Future<Map<String, dynamic>> createPaymentIntent({
   };
   if (sessionId != null) metadata['sessionId'] = sessionId;
   if (placeIds != null && placeIds.isNotEmpty) metadata['placeIds'] = jsonEncode(placeIds);
+  if (sectionSelections != null && sectionSelections.isNotEmpty) metadata['sectionSelections'] = jsonEncode(sectionSelections);
   if (seatTickets != null && seatTickets.isNotEmpty) metadata['seatTickets'] = jsonEncode(seatTickets);
   if (fullName != null && fullName.trim().isNotEmpty) metadata['fullName'] = fullName.trim();
 
@@ -136,6 +138,7 @@ Future<Map<String, dynamic>> createPaytrailPayment({
   required double vatRate,
   String? sessionId,
   List<String>? placeIds,
+  List<Map<String, dynamic>>? sectionSelections,
   List<Map<String, dynamic>>? seatTickets,
   String? country,
   String? fullName,
@@ -216,6 +219,7 @@ Future<Map<String, dynamic>> createPaytrailPayment({
   }
   if (sessionId != null) metadata['sessionId'] = sessionId;
   if (placeIds != null && placeIds.isNotEmpty) metadata['placeIds'] = jsonEncode(placeIds);
+  if (sectionSelections != null && sectionSelections.isNotEmpty) metadata['sectionSelections'] = jsonEncode(sectionSelections);
   if (seatTickets != null && seatTickets.isNotEmpty) metadata['seatTickets'] = jsonEncode(seatTickets);
   if (fullName != null && fullName.trim().isNotEmpty) metadata['fullName'] = fullName.trim();
 
@@ -247,6 +251,7 @@ Future<Map<String, dynamic>> paymentSuccess({
   String? externalMerchantId,
   String? sessionId,
   List<String>? placeIds,
+  List<Map<String, dynamic>>? sectionSelections,
   List<Map<String, dynamic>>? seatTickets,
 }) async {
   final metadata = <String, dynamic>{
@@ -263,6 +268,7 @@ Future<Map<String, dynamic>> paymentSuccess({
   metadata['marketingOptIn'] = false;
   metadata['locale'] = 'en-US';
   if (placeIds != null && placeIds.isNotEmpty) metadata['placeIds'] = placeIds;
+  if (sectionSelections != null && sectionSelections.isNotEmpty) metadata['sectionSelections'] = sectionSelections;
   if (seatTickets != null && seatTickets.isNotEmpty) metadata['seatTickets'] = seatTickets;
 
   final response = await apiPost('/payment-success', body: {
