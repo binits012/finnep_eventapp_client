@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'api_client.dart';
+import '../utils/currency.dart';
 import '../utils/ticket_pricing.dart';
 
 const _chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -110,7 +111,7 @@ Future<Map<String, dynamic>> createPaymentIntent({
 
   final response = await apiPost('/create-payment-intent', body: {
     'amount': amountCents,
-    'currency': currency,
+    'currency': normalizeStripeCurrencyCode(currency),
     'paymentProvider': 'stripe',
     'metadata': metadata,
   });
@@ -226,7 +227,7 @@ Future<Map<String, dynamic>> createPaytrailPayment({
   // Mobile app endpoint: uses PAYTRAIL_APP_RETURN_URL to deep-link back to the app after payment.
   final response = await apiPost('/create-paytrail-payment-app', body: {
     'amount': amountCents,
-    'currency': currency,
+    'currency': normalizeStripeCurrencyCode(currency),
     'paymentProvider': 'paytrail',
     'metadata': metadata,
   });

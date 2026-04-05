@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -37,11 +39,25 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
   int _quantity = 1;
   bool _hasSeatSelectionFromSeats = false;
   bool _hasPricingConfig = false;
+  DateTime _now = DateTime.now();
+  Timer? _countdownTimer;
 
   @override
   void initState() {
     super.initState();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        _now = DateTime.now();
+      });
+    });
     _load();
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -207,6 +223,12 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
     final isPreSaleFull = event.isPreSaleWaitlistFull;
     final date = DateTime.tryParse(event.eventDate);
     final dateStr = date != null ? DateFormat.yMMMd().add_Hm().format(date) : event.eventDate;
+    final countdown = date?.difference(_now);
+    final hasFutureCountdown = countdown != null && countdown.inSeconds > 0;
+    final countdownDays = hasFutureCountdown ? countdown.inDays : 0;
+    final countdownHours = hasFutureCountdown ? countdown.inHours % 24 : 0;
+    final countdownMinutes = hasFutureCountdown ? countdown.inMinutes % 60 : 0;
+    final countdownSeconds = hasFutureCountdown ? countdown.inSeconds % 60 : 0;
     return Scaffold(
       appBar: AppBar(
         title: Text(event.eventTitle),
@@ -243,6 +265,26 @@ class _EventDetailScreenState extends State<EventDetailScreen> {
             Text(event.eventTitle, style: Theme.of(context).textTheme.headlineSmall),
             const SizedBox(height: 8),
             Text(dateStr),
+            if (hasFutureCountdown) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  'The event starts in $countdownDays day${countdownDays == 1 ? '' : 's'} '
+                  '${countdownHours.toString().padLeft(2, '0')}h '
+                  '${countdownMinutes.toString().padLeft(2, '0')}min '
+                  '${countdownSeconds.toString().padLeft(2, '0')}s',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+              ),
+            ],
             if (event.venueInfo?.name != null) Text('Venue: ${event.venueInfo!.name}'),
             if (event.eventLocationAddress != null) Text(event.eventLocationAddress!),
             if (event.eventDescription != null && event.eventDescription!.isNotEmpty) ...[

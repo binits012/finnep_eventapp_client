@@ -194,7 +194,7 @@ class _EventsScreenState extends State<EventsScreen> {
                           child: Text(
                             e.eventTitle,
                             style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
-                            maxLines: 3,
+                            maxLines: isHorizontal ? 2 : 3,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -239,7 +239,7 @@ class _EventsScreenState extends State<EventsScreen> {
                       Text(
                         e.eventLocationAddress!,
                         style: TextStyle(color: secondary, fontSize: 11),
-                        maxLines: 2,
+                        maxLines: isHorizontal ? 1 : 2,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ],

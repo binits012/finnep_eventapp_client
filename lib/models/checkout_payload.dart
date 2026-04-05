@@ -1,3 +1,4 @@
+import '../utils/currency.dart';
 import '../utils/ticket_pricing.dart';
 
 class CheckoutPayload {
@@ -46,7 +47,7 @@ class CheckoutPayload {
     this.vat = 0,
     this.taxLabel,
     this.quantity = 1,
-    this.currency = 'eur',
+    String currency = 'eur',
     this.paytrailEnabled = false,
     this.placeIds,
     this.sectionSelections,
@@ -56,7 +57,7 @@ class CheckoutPayload {
     this.reservationExpiresAtMs,
     this.totalAmountOverride,
     this.finalPricePerTicket,
-  });
+  }) : currency = normalizeStripeCurrencyCode(currency);
 
   factory CheckoutPayload.fromJson(Map<String, dynamic> json) {
     return CheckoutPayload(

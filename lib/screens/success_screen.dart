@@ -1,7 +1,8 @@
 import 'dart:io';
-import 'dart:typed_data';
+import 'dart:convert';
 import 'dart:ui' as ui;
 
+import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../utils/currency.dart';
 import '../utils/place_id_decoder.dart';
+import '../utils/ticket_entry_qr.dart';
 
 class SuccessScreen extends StatefulWidget {
   const SuccessScreen({super.key, this.ticketData});
@@ -105,56 +107,119 @@ class _SuccessScreenState extends State<SuccessScreen> {
     setState(() => _downloading = true);
     String? errorMsg;
     try {
+      Future<Uint8List?> buildQrPng(String payload, {double size = 300}) async {
+        if (payload.trim().isEmpty) return null;
+        try {
+          final painter = QrPainter(
+            data: payload,
+            version: QrVersions.auto,
+            gapless: true,
+          );
+          final byteData = await painter.toImageData(size, format: ui.ImageByteFormat.png);
+          return byteData?.buffer.asUint8List();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      final files = <String, Uint8List>{};
+
+      // Include a visual snapshot of the ticket card in the ZIP when possible.
       await Future.delayed(const Duration(milliseconds: 150));
-      Uint8List? pngBytes;
       final ro = _ticketKey.currentContext?.findRenderObject();
       if (ro is RenderRepaintBoundary) {
         try {
           final image = await ro.toImage(pixelRatio: 3.0);
           final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-          if (byteData != null) pngBytes = byteData.buffer.asUint8List();
+          if (byteData != null) {
+            files['ticket-card.png'] = byteData.buffer.asUint8List();
+          }
         } catch (_) {}
       }
-      if (pngBytes == null || pngBytes.isEmpty) {
-        final payload = _getQrPayload();
-        if (payload.isNotEmpty) {
-          try {
-            final painter = QrPainter(
-              data: payload,
-              version: QrVersions.auto,
-              gapless: true,
-            );
-            final byteData = await painter.toImageData(300, format: ui.ImageByteFormat.png);
-            if (byteData != null) pngBytes = byteData.buffer.asUint8List();
-          } catch (_) {}
+
+      final ticket = _getTicket(widget.ticketData);
+      Map<String, dynamic>? ticketInfo;
+      if (ticket != null && ticket['ticketInfo'] != null) {
+        final ti = ticket['ticketInfo'];
+        if (ti is Map<String, dynamic>) {
+          ticketInfo = ti;
+        } else if (ti is Map) {
+          ticketInfo = Map<String, dynamic>.from(ti);
         }
       }
-      if (pngBytes == null || pngBytes.isEmpty) {
-        errorMsg = 'Could not generate ticket image';
-      } else {
-        final name = 'ticket_${DateTime.now().millisecondsSinceEpoch}.png';
-        String dirPath;
-        try {
-          final dir = await getTemporaryDirectory();
-          dirPath = dir.path;
-        } on PlatformException {
-          if (!Platform.isAndroid) rethrow;
-          const channel = MethodChannel('com.finnep.eventapp/cache_path');
-          final path = await channel.invokeMethod<String>('getCachePath');
-          if (path == null || path.isEmpty) {
-            throw PlatformException(code: 'cache_path', message: 'No cache path');
-          }
-          dirPath = path;
+
+      final qtyStr = _field(ticket, ticketInfo, ['quantity', 'qty']);
+      final orderQty = parseTicketOrderQuantity(qtyStr, ticketInfo);
+      final showMasterQr = showMasterEntryQrOnClient(orderQty);
+
+      if (showMasterQr) {
+        final payload = _resolvePrimarySharePayload();
+        final qr = await buildQrPng(payload, size: 400);
+        if (qr != null && qr.isNotEmpty) {
+          files['master-entry-qr.png'] = qr;
         }
-        final file = File('$dirPath/$name');
-        await file.writeAsBytes(pngBytes);
-        if (!await file.exists()) {
-          errorMsg = 'Could not save file';
+      } else {
+        final kids = parseChildQrCodes(ticketInfo);
+        for (final child in kids) {
+          final rawIdx = child['childIndex'];
+          final idx = rawIdx is num ? rawIdx.toInt() : 1;
+          final payload = (child['childQrCodeValue'] ?? '').toString();
+          final qr = await buildQrPng(payload, size: 400);
+          if (qr != null && qr.isNotEmpty) {
+            files['guest-$idx-entry-qr.png'] = qr;
+          }
+        }
+      }
+
+      final eventTitle = _field(ticket, ticketInfo, ['eventName', 'eventTitle']);
+      final ticketName = _field(ticket, ticketInfo, ['ticketName', 'ticketType']);
+      final orderId = _field(ticket, ticketInfo, ['orderId', 'orderRef', 'reference']);
+      final purchaseDate = _field(ticket, ticketInfo, ['purchaseDate', 'createdAt']);
+      final ticketId = ticket?['_id'] != null ? _str(ticket!['_id']) : _str(widget.ticketData?['ticketId']);
+      final ticketInfoText = StringBuffer()
+        ..writeln('Event: $eventTitle')
+        ..writeln('Ticket: $ticketName')
+        ..writeln('Ticket ID: $ticketId')
+        ..writeln('Order reference: $orderId')
+        ..writeln('Purchase date: $purchaseDate')
+        ..writeln('Quantity: $orderQty');
+      files['ticket-info.txt'] = Uint8List.fromList(utf8.encode(ticketInfoText.toString()));
+
+      if (files.isEmpty) {
+        errorMsg = 'Could not generate ticket files';
+      } else {
+        final archive = Archive();
+        files.forEach((name, bytes) {
+          archive.addFile(ArchiveFile(name, bytes.length, bytes));
+        });
+        final zipBytes = ZipEncoder().encode(archive);
+        if (zipBytes.isEmpty) {
+          errorMsg = 'Could not create zip file';
         } else {
+          final fileName = 'ticket_bundle_${DateTime.now().millisecondsSinceEpoch}.zip';
+          String dirPath;
           try {
-            await Share.shareXFiles([XFile(file.path)], text: 'My event ticket');
-          } catch (shareError) {
-            errorMsg = shareError is Exception ? shareError.toString().replaceFirst('Exception: ', '') : 'Share failed';
+            final dir = await getTemporaryDirectory();
+            dirPath = dir.path;
+          } on PlatformException {
+            if (!Platform.isAndroid) rethrow;
+            const channel = MethodChannel('com.finnep.eventapp/cache_path');
+            final path = await channel.invokeMethod<String>('getCachePath');
+            if (path == null || path.isEmpty) {
+              throw PlatformException(code: 'cache_path', message: 'No cache path');
+            }
+            dirPath = path;
+          }
+          final file = File('$dirPath/$fileName');
+          await file.writeAsBytes(zipBytes, flush: true);
+          if (!await file.exists()) {
+            errorMsg = 'Could not save zip file';
+          } else {
+            try {
+              await Share.shareXFiles([XFile(file.path)], text: 'My event ticket bundle');
+            } catch (shareError) {
+              errorMsg = shareError is Exception ? shareError.toString().replaceFirst('Exception: ', '') : 'Share failed';
+            }
           }
         }
       }
@@ -172,10 +237,29 @@ class _SuccessScreenState extends State<SuccessScreen> {
     }
   }
 
-  String _getQrPayload() {
+  /// Single-ticket: parent ticket id (master). Multi-ticket: first guest payload for PNG fallback only.
+  String _resolvePrimarySharePayload() {
     final ticket = _getTicket(widget.ticketData);
+    Map<String, dynamic>? ticketInfo;
+    if (ticket != null && ticket['ticketInfo'] != null) {
+      final ti = ticket['ticketInfo'];
+      if (ti is Map<String, dynamic>) {
+        ticketInfo = ti;
+      } else if (ti is Map) {
+        ticketInfo = Map<String, dynamic>.from(ti);
+      }
+    }
+    final qtyStr = _field(ticket, ticketInfo, ['quantity', 'qty']);
+    final orderQty = parseTicketOrderQuantity(qtyStr, ticketInfo);
+    if (!showMasterEntryQrOnClient(orderQty)) {
+      final kids = parseChildQrCodes(ticketInfo);
+      if (kids.isNotEmpty) {
+        return (kids.first['childQrCodeValue'] ?? '').toString();
+      }
+      return '';
+    }
     final ticketId = ticket?['_id'] != null ? _str(ticket!['_id']) : null;
-    return ticketId ?? widget.ticketData?['ticketId'] ?? '';
+    return ticketId ?? _str(widget.ticketData?['ticketId']);
   }
 
   @override
@@ -195,11 +279,15 @@ class _SuccessScreenState extends State<SuccessScreen> {
     } else {
       debugPrint('[SuccessScreen] ticket is null');
     }
-    final ticketInfo = ticket != null && ticket['ticketInfo'] != null
-        ? (ticket['ticketInfo'] is Map<String, dynamic>
-            ? ticket['ticketInfo'] as Map<String, dynamic>
-            : null)
-        : null;
+    Map<String, dynamic>? ticketInfo;
+    if (ticket != null && ticket['ticketInfo'] != null) {
+      final ti = ticket['ticketInfo'];
+      if (ti is Map<String, dynamic>) {
+        ticketInfo = ti;
+      } else if (ti is Map) {
+        ticketInfo = Map<String, dynamic>.from(ti);
+      }
+    }
     debugPrint('[SuccessScreen] ticketInfo: ${ticketInfo != null ? ticketInfo.keys.toList() : null}');
     final eventTitle = _field(ticket, ticketInfo, ['eventName', 'eventTitle']);
     final eventDate = _field(ticket, ticketInfo, ['eventDate', 'date', 'startDate']);
@@ -244,12 +332,17 @@ class _SuccessScreenState extends State<SuccessScreen> {
         : totalPaidRaw.isNotEmpty
             ? totalPaidRaw
             : (price.isNotEmpty && currency.isNotEmpty)
-                ? '$price $currency'
+                ? '$price ${normalizeDisplayCurrencyCode(currency)}'
                 : price.isNotEmpty
                     ? price
                     : '';
     final ticketId = ticket?['_id'] != null ? _str(ticket!['_id']) : _str(widget.ticketData?['ticketId']);
     final qrPayload = ticketId.isNotEmpty ? ticketId : '';
+    final orderQty = parseTicketOrderQuantity(quantity, ticketInfo);
+    final showMasterQr = showMasterEntryQrOnClient(orderQty);
+    final childQrCodes = parseChildQrCodes(ticketInfo);
+    final canSaveOrShareQr =
+        (showMasterQr && qrPayload.isNotEmpty) || (!showMasterQr && childQrCodes.isNotEmpty);
 
     debugPrint('[SuccessScreen] eventTitle="$eventTitle" eventDate="$eventDate" venue="$venue" ticketName="$ticketName"');
     debugPrint('[SuccessScreen] attendee="$attendee" orderId="$orderId" purchaseDate="$purchaseDate" totalPaid="$totalPaid"');
@@ -308,7 +401,7 @@ class _SuccessScreenState extends State<SuccessScreen> {
               ),
             ),
             const SizedBox(height: 16),
-            if (infoChildren.isNotEmpty || qrPayload.isNotEmpty)
+            if (infoChildren.isNotEmpty || (showMasterQr && qrPayload.isNotEmpty) || (!showMasterQr && childQrCodes.isNotEmpty))
               RepaintBoundary(
                 key: _ticketKey,
                 child: Container(
@@ -329,7 +422,7 @@ class _SuccessScreenState extends State<SuccessScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       if (infoChildren.isNotEmpty) ...infoChildren,
-                      if (qrPayload.isNotEmpty) ...[
+                      if (showMasterQr && qrPayload.isNotEmpty) ...[
                         const SizedBox(height: 24),
                         Center(
                           child: Text(
@@ -355,13 +448,14 @@ class _SuccessScreenState extends State<SuccessScreen> {
                           ),
                         ),
                       ],
+                      if (!showMasterQr && childQrCodes.isNotEmpty) _buildGuestQrSection(context, childQrCodes, scheme),
                     ],
                   ),
                 ),
               ),
             const SizedBox(height: 32),
             ElevatedButton.icon(
-              onPressed: qrPayload.isNotEmpty && !_downloading ? _downloadTicket : null,
+              onPressed: canSaveOrShareQr && !_downloading ? _downloadTicket : null,
               icon: _downloading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.download),
               label: Text(_downloading ? 'Preparing…' : 'Download ticket'),
             ),
@@ -374,6 +468,64 @@ class _SuccessScreenState extends State<SuccessScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildGuestQrSection(BuildContext context, List<Map<String, dynamic>> children, ColorScheme scheme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 24),
+        Center(
+          child: Text(
+            'Entry codes for each guest',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(color: scheme.onSurface),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Center(
+          child: Text(
+            'Each guest should show their own code at the entrance.',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ),
+        ...children.asMap().entries.map((e) {
+          final i = e.key;
+          final m = e.value;
+          final rawIdx = m['childIndex'];
+          final idx = rawIdx is num ? rawIdx.toInt() : i + 1;
+          final val = m['childQrCodeValue']?.toString() ?? '';
+          return Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: Column(
+              children: [
+                Text(
+                  'Guest $idx',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600, color: scheme.onSurface),
+                ),
+                const SizedBox(height: 8),
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: QrImageView(
+                      data: val,
+                      version: QrVersions.auto,
+                      size: 200,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
+      ],
     );
   }
 }

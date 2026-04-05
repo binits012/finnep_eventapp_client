@@ -6,7 +6,9 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../models/ticket.dart';
 import '../services/guest_service.dart';
+import '../utils/currency.dart';
 import '../utils/place_id_decoder.dart';
+import '../utils/ticket_entry_qr.dart';
 
 class MyTicketDetailScreen extends StatefulWidget {
   const MyTicketDetailScreen({super.key, required this.ticketId});
@@ -32,7 +34,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
 
   String _formatMoney(double? amount, String currency) {
     if (amount == null) return '';
-    final c = currency.trim().isNotEmpty ? currency.trim() : 'EUR';
+    final c = normalizeDisplayCurrencyCode(currency.trim().isNotEmpty ? currency : 'EUR');
     return '${amount.toStringAsFixed(3)} $c';
   }
 
@@ -181,6 +183,63 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     );
   }
 
+  Widget _buildGuestQrSection(BuildContext context, List<Map<String, dynamic>> children) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Entry codes for each guest',
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Each guest should show their own code at the entrance.',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        ...children.asMap().entries.map((e) {
+          final i = e.key;
+          final m = e.value;
+          final rawIdx = m['childIndex'];
+          final idx = rawIdx is num ? rawIdx.toInt() : i + 1;
+          final val = m['childQrCodeValue']?.toString() ?? '';
+          return Padding(
+            padding: const EdgeInsets.only(top: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Guest $idx', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: scheme.shadow.withValues(alpha: 0.12),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: QrImageView(
+                      data: val,
+                      version: QrVersions.auto,
+                      size: 200,
+                      backgroundColor: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
+      ],
+    );
+  }
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
@@ -273,7 +332,15 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     );
     final effectiveQrPayload =
         extractedQrPayload.trim().isNotEmpty ? extractedQrPayload.trim() : t.id.trim();
+    final ticketInfoMap = t.raw?['ticketInfo'] is Map<String, dynamic>
+        ? t.raw!['ticketInfo'] as Map<String, dynamic>
+        : (t.raw?['ticketInfo'] is Map ? Map<String, dynamic>.from(t.raw!['ticketInfo'] as Map) : null);
+    final orderQty = parseTicketOrderQuantity(t.quantity, ticketInfoMap);
+    final showMasterQr = showMasterEntryQrOnClient(orderQty);
+    final childQrCodes = parseChildQrCodes(ticketInfoMap);
     final hasQr = effectiveQrPayload.isNotEmpty;
+    final showMasterQrBlock = showMasterQr && hasQr;
+    final showGuestQrBlock = !showMasterQr && childQrCodes.isNotEmpty;
 
     // Seat ticket breakdown (optional for seated events).
     final seatTicketsRaw = t.raw?['ticketInfo'] is Map
@@ -296,7 +363,8 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
       }
     }
 
-    final currency = (t.currency ?? _extractField(t.raw, ['currency'])).trim();
+    final currencyRaw = (t.currency ?? _extractField(t.raw, ['currency'])).trim();
+    final currency = normalizeDisplayCurrencyCode(currencyRaw.isNotEmpty ? currencyRaw : 'EUR');
     final bool usedModelBasePrice = (t.basePrice ?? '').trim().isNotEmpty;
     final bool usedModelServiceFee = (t.serviceFee ?? '').trim().isNotEmpty;
     final bool usedModelTotalAmount = (t.totalAmount ?? '').trim().isNotEmpty;
@@ -493,7 +561,10 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
                         final st = entry.value;
                         final pricingRaw = st['pricing'];
                         final pricing = pricingRaw is Map ? Map<String, dynamic>.from(pricingRaw) : <String, dynamic>{};
-                        final lineCurrency = (pricing['currency']?.toString() ?? currency).trim();
+                        final rawLineCur = (pricing['currency']?.toString() ?? '').trim();
+                        final lineCurrency = normalizeDisplayCurrencyCode(
+                          rawLineCur.isNotEmpty ? rawLineCur : (currencyRaw.isNotEmpty ? currencyRaw : 'EUR'),
+                        );
                         final lineBase = _toDouble(pricing['basePrice'] ?? pricing['unitPrice']);
                         final lineServiceFee = _toDouble(pricing['serviceFee']);
                         final lineVat = _resolveVatAmount(pricing['basePrice'] ?? pricing['unitPrice'], pricing['tax'] ?? pricing['vat']);
@@ -548,11 +619,15 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
                 ],
               ),
             ),
-            if (hasQr) ...[
+            if (showMasterQrBlock) ...[
               const SizedBox(height: 24),
               Text('QR Code', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
               Center(child: _buildQrWidget(context, t)),
+            ],
+            if (showGuestQrBlock) ...[
+              const SizedBox(height: 24),
+              _buildGuestQrSection(context, childQrCodes),
             ],
           ],
         ),

@@ -4,9 +4,14 @@ import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/event.dart';
+import '../models/site_notification.dart';
 import '../services/event_service.dart';
+import '../services/site_notification_dismiss_store.dart';
 import '../theme_scope.dart';
 import '../utils/currency.dart';
+import '../utils/site_notice_utils.dart';
+import '../widgets/home_site_notice_widgets.dart';
+import '../widgets/site_notice_popover_dialog.dart';
 
 Future<void> _openUrl(String url) async {
   final uri = Uri.tryParse(url);
@@ -62,6 +67,9 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   List<Event> _events = [];
+  List<SiteNotification> _notifications = [];
+  Set<String> _dismissed = {};
+  bool _scheduledPopovers = false;
   bool _loading = true;
   String? _error;
 
@@ -77,17 +85,54 @@ class _HomeScreenState extends State<HomeScreen> {
       _error = null;
     });
     try {
+      final dismissed = await SiteNotificationDismissStore.load();
       final data = await getDataForFront();
-      final events = data.events;
+      if (!mounted) return;
       setState(() {
-        _events = events;
+        _events = data.events;
+        _notifications = data.notifications;
+        _dismissed = dismissed;
         _loading = false;
       });
+      if (!_scheduledPopovers) {
+        _scheduledPopovers = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _runPopoverQueue();
+        });
+      }
     } catch (e) {
       setState(() {
         _error = e.toString();
         _loading = false;
       });
+    }
+  }
+
+  Future<void> _dismissNotice(String id) async {
+    await SiteNotificationDismissStore.dismiss(id);
+    if (!mounted) return;
+    setState(() {
+      _dismissed.add(id);
+    });
+  }
+
+  Future<void> _runPopoverQueue() async {
+    final pops = _notifications.where((n) {
+      if (_dismissed.contains(n.id)) return false;
+      if (resolveSiteNoticeVariant(n.notificationTypeName) != SiteNoticeVariant.popOver) {
+        return false;
+      }
+      return hasRenderableRichNotificationHtml(n.notificationHtml);
+    }).toList();
+
+    for (final n in pops) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: true,
+        builder: (_) => SiteNoticePopoverDialog(html: n.notificationHtml),
+      );
+      if (mounted) await _dismissNotice(n.id);
     }
   }
 
@@ -180,33 +225,90 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 )
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: SingleChildScrollView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (_featured.isNotEmpty) ...[
-                          const Text('Featured', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          _FeaturedCarousel(events: _featured),
-                          const SizedBox(height: 24),
-                        ],
-                        if (_today.isNotEmpty) ...[
-                          const Text('Happening today', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          _EventList(events: _today),
-                          const SizedBox(height: 24),
-                        ],
-                        const Text('Upcoming', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 8),
-                        _EventList(events: _upcoming),
-                      ],
+              : _buildBodyWithNotices(context),
+    );
+  }
+
+  Widget _buildBodyWithNotices(BuildContext context) {
+    final marquees = _notifications.where((n) {
+      if (_dismissed.contains(n.id)) return false;
+      if (resolveSiteNoticeVariant(n.notificationTypeName) != SiteNoticeVariant.marquee) return false;
+      return htmlToPlainText(n.notificationHtml).trim().isNotEmpty;
+    }).toList();
+
+    final inline = _notifications.where((n) {
+      if (_dismissed.contains(n.id)) return false;
+      if (resolveSiteNoticeVariant(n.notificationTypeName) != SiteNoticeVariant.inBetween) return false;
+      return hasRenderableRichNotificationHtml(n.notificationHtml);
+    }).toList();
+
+    final footer = _notifications.where((n) {
+      if (_dismissed.contains(n.id)) return false;
+      if (resolveSiteNoticeVariant(n.notificationTypeName) != SiteNoticeVariant.footerBased) return false;
+      return hasRenderableRichNotificationHtml(n.notificationHtml);
+    }).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ...marquees.map(
+          (n) => SiteNoticeMarqueeRow(
+            item: n,
+            onDismiss: () => _dismissNotice(n.id),
+          ),
+        ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: _load,
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ...inline.map(
+                    (n) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: SiteNoticeRichCard(
+                        item: n,
+                        onDismiss: () => _dismissNotice(n.id),
+                      ),
                     ),
                   ),
-                ),
+                  if (_featured.isNotEmpty) ...[
+                    const Text('Featured', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    _FeaturedCarousel(events: _featured),
+                    const SizedBox(height: 24),
+                  ],
+                  if (_today.isNotEmpty) ...[
+                    const Text('Happening today', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    _EventList(events: _today),
+                    const SizedBox(height: 24),
+                  ],
+                  const Text('Upcoming', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  _EventList(events: _upcoming),
+                  if (footer.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    ...footer.map(
+                      (n) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: SiteNoticeRichCard(
+                          item: n,
+                          denseBottom: true,
+                          onDismiss: () => _dismissNotice(n.id),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

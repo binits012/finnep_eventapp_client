@@ -1,3 +1,5 @@
+import '../utils/currency.dart';
+
 enum SeatStatus { available, sold, reserved }
 
 class SeatModel {
@@ -75,6 +77,8 @@ class SeatMapData {
     final areaSections = areaSectionsList
         .map((e) => AreaSectionModel.fromJson(e as Map<String, dynamic>))
         .toList();
+    final sectionsWithAreaMeta =
+        SeatMapData._mergeSectionPolygonsWithAreaMeta(sections, areaSections);
     final zonesList = json['pricingZones'] as List<dynamic>? ?? [];
     final pricingZones = zonesList
         .map((e) => PricingZone.fromJson(e as Map<String, dynamic>))
@@ -87,13 +91,35 @@ class SeatMapData {
       placeIds: placeIds,
       sold: sold,
       reserved: reserved,
-      sections: sections,
+      sections: sectionsWithAreaMeta,
       areaSections: areaSections,
       backgroundSvg: json['backgroundSvg'],
       pricingZones: pricingZones,
       pricingConfig: pricingConfig,
       venue: json['venue'] as Map<String, dynamic>?,
     );
+  }
+
+  /// Copy [declaredCapacity] / [selectionMode] from `areaSections` onto matching `sections` (for map styling).
+  static List<SectionModel> _mergeSectionPolygonsWithAreaMeta(
+    List<SectionModel> sections,
+    List<AreaSectionModel> areas,
+  ) {
+    if (areas.isEmpty) return sections;
+    final byId = {for (final a in areas) a.id: a};
+    return sections.map((s) {
+      final a = byId[s.id];
+      if (a == null) return s;
+      return SectionModel(
+        id: s.id,
+        name: s.name,
+        color: s.color,
+        polygon: s.polygon,
+        spacingConfig: s.spacingConfig,
+        selectionMode: s.selectionMode ?? a.selectionMode,
+        declaredCapacity: s.declaredCapacity ?? a.declaredCapacity,
+      );
+    }).toList();
   }
 }
 
@@ -103,6 +129,8 @@ class AreaSectionModel {
   final String sectionType;
   final String selectionMode;
   final int capacity;
+  /// When present and 0 with [selectionMode] == area, section is not sold (map polygon only).
+  final int? declaredCapacity;
   final int soldCount;
   final int reservedCount;
   final int availableCount;
@@ -114,19 +142,29 @@ class AreaSectionModel {
     required this.sectionType,
     required this.selectionMode,
     required this.capacity,
+    this.declaredCapacity,
     required this.soldCount,
     required this.reservedCount,
     required this.availableCount,
     required this.color,
   });
 
+  /// Area-level section with CMS capacity 0 is shown on the map but cannot be purchased.
+  bool get isPurchasableForAreaFlow {
+    if (selectionMode != 'area') return true;
+    if (declaredCapacity == null) return true;
+    return declaredCapacity != 0;
+  }
+
   factory AreaSectionModel.fromJson(Map<String, dynamic> json) {
+    final dc = json['declaredCapacity'];
     return AreaSectionModel(
       id: json['id']?.toString() ?? '',
       name: json['name']?.toString() ?? '',
       sectionType: json['sectionType']?.toString() ?? 'Area',
       selectionMode: json['selectionMode']?.toString() ?? 'area',
       capacity: (json['capacity'] as num?)?.toInt() ?? 0,
+      declaredCapacity: dc == null ? null : (dc as num).toInt(),
       soldCount: (json['soldCount'] as num?)?.toInt() ?? 0,
       reservedCount: (json['reservedCount'] as num?)?.toInt() ?? 0,
       availableCount: (json['availableCount'] as num?)?.toInt() ?? 0,
@@ -141,6 +179,8 @@ class SectionModel {
   final String color;
   final List<SectionPoint> polygon;
   final SectionSpacingConfig? spacingConfig;
+  final String? selectionMode;
+  final int? declaredCapacity;
 
   SectionModel({
     required this.id,
@@ -148,21 +188,31 @@ class SectionModel {
     required this.color,
     this.polygon = const [],
     this.spacingConfig,
+    this.selectionMode,
+    this.declaredCapacity,
   });
 
-  factory SectionModel.fromJson(Map<String, dynamic> json) => SectionModel(
-        id: json['id'] as String? ?? '',
-        name: json['name'] as String? ?? '',
-        color: json['color'] as String? ?? '#cccccc',
-        polygon: (json['polygon'] as List<dynamic>? ?? [])
-            .map((e) => SectionPoint.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        spacingConfig: json['spacingConfig'] is Map<String, dynamic>
-            ? SectionSpacingConfig.fromJson(
-                json['spacingConfig'] as Map<String, dynamic>,
-              )
-            : null,
-      );
+  bool get isInactiveAreaHighlight =>
+      selectionMode == 'area' && declaredCapacity == 0;
+
+  factory SectionModel.fromJson(Map<String, dynamic> json) {
+    final dc = json['declaredCapacity'];
+    return SectionModel(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      color: json['color'] as String? ?? '#cccccc',
+      polygon: (json['polygon'] as List<dynamic>? ?? [])
+          .map((e) => SectionPoint.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      spacingConfig: json['spacingConfig'] is Map<String, dynamic>
+          ? SectionSpacingConfig.fromJson(
+              json['spacingConfig'] as Map<String, dynamic>,
+            )
+          : null,
+      selectionMode: json['selectionMode']?.toString(),
+      declaredCapacity: dc == null ? null : (dc as num).toInt(),
+    );
+  }
 }
 
 class SectionPoint {
@@ -227,7 +277,7 @@ class PricingConfig {
   factory PricingConfig.fromJson(Map<String, dynamic> json) {
     final tiersList = json['tiers'] as List<dynamic>? ?? [];
     return PricingConfig(
-      currency: json['currency'] as String? ?? 'EUR',
+      currency: normalizeStripeCurrencyCode((json['currency'] as String?) ?? 'eur'),
       orderFee: (json['orderFee'] as num?)?.toDouble() ?? 0,
       tiers: tiersList
           .map((e) => PricingTier.fromJson(e as Map<String, dynamic>))

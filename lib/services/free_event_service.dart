@@ -14,7 +14,7 @@ Future<void> registerFreeEvent({
   required String ticketName,
   bool marketingOptIn = false,
 }) async {
-  final body = {
+  final body = <String, dynamic>{
     'email': email.trim(),
     'quantity': quantity,
     'eventId': eventId,
@@ -25,6 +25,7 @@ Future<void> registerFreeEvent({
     'ticketName': ticketName,
     'marketingOptIn': marketingOptIn,
   };
+
   debugPrint('[FreeEvent] POST /front/free-event-register payload: $body');
   final response = await apiPost('/free-event-register', body: body);
   debugPrint('[FreeEvent] response status=${response.statusCode} body=${response.body}');

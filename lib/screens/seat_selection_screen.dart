@@ -46,13 +46,17 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
   Duration _reservationRemaining = Duration.zero;
   Timer? _reservationTimer;
 
+  List<AreaSectionModel> get _purchasableAreaSections {
+    final all = _seatData?.areaSections ?? const <AreaSectionModel>[];
+    return all.where((a) => a.isPurchasableForAreaFlow).toList();
+  }
+
   List<Map<String, dynamic>> get _sectionSelections {
     final areaById = <String, AreaSectionModel>{
-      for (final area in (_seatData?.areaSections ?? const <AreaSectionModel>[]))
-        area.id: area,
+      for (final area in _purchasableAreaSections) area.id: area,
     };
     return _areaSelectionMap.entries
-        .where((e) => e.value > 0)
+        .where((e) => e.value > 0 && areaById.containsKey(e.key))
         .map((e) => <String, dynamic>{
               'sectionId': e.key,
               'sectionName': areaById[e.key]?.name,
@@ -103,7 +107,7 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
           total += (areaTicket.totalPerTicket * areaQty);
         }
       } else {
-        final areaSections = _seatData?.areaSections ?? const <AreaSectionModel>[];
+        final areaSections = _purchasableAreaSections;
         for (final entry in _areaSelectionMap.entries) {
           if (entry.value <= 0) continue;
           final areaId = entry.key;
@@ -223,6 +227,9 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
         _seatData = data;
         _seats = seats;
         _loading = false;
+        final purchasableIds =
+            data.areaSections.where((a) => a.isPurchasableForAreaFlow).map((a) => a.id).toSet();
+        _areaSelectionMap.removeWhere((id, _) => !purchasableIds.contains(id));
       });
       debugPrint('[SeatSelection] _load success — _seats.length=${seats.length}, _loading=false');
     } catch (e, stack) {
@@ -236,7 +243,7 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
   }
 
   void _continueFromSeats() {
-    final areaSections = _seatData?.areaSections ?? const <AreaSectionModel>[];
+    final areaSections = _purchasableAreaSections;
     final areaById = <String, AreaSectionModel>{
       for (final area in areaSections) area.id: area,
     };
@@ -408,8 +415,7 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
       }).toList();
       if (_areaSelectionMap.isNotEmpty) {
         final areaById = <String, AreaSectionModel>{
-          for (final area in (_seatData?.areaSections ?? const <AreaSectionModel>[]))
-            area.id: area,
+          for (final area in _purchasableAreaSections) area.id: area,
         };
         for (final entry in _areaSelectionMap.entries) {
           final qty = entry.value;
@@ -428,8 +434,7 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
       }
       if (selectedSeats.isEmpty && _areaSelectionMap.isNotEmpty) {
         final areaById = <String, AreaSectionModel>{
-          for (final area in (_seatData?.areaSections ?? const <AreaSectionModel>[]))
-            area.id: area,
+          for (final area in _purchasableAreaSections) area.id: area,
         };
         final selectedAreaEntries = _areaSelectionMap.entries.where((e) => e.value > 0).toList();
         if (selectedAreaEntries.length == 1) {
@@ -459,7 +464,7 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
         if (selectedAreaEntries.length == 1) {
           final areaId = selectedAreaEntries.first.key;
           AreaSectionModel? area;
-          for (final a in (_seatData?.areaSections ?? const <AreaSectionModel>[])) {
+          for (final a in _purchasableAreaSections) {
             if (a.id == areaId) {
               area = a;
               break;
@@ -514,7 +519,7 @@ class _SeatSelectionScreenState extends State<SeatSelectionScreen> {
       }
 
       if (areaQty > 0) {
-        final areaSections = _seatData?.areaSections ?? const <AreaSectionModel>[];
+        final areaSections = _purchasableAreaSections;
         for (final entry in selectedAreaEntries) {
           final q = entry.value;
           if (q <= 0) continue;
@@ -1250,6 +1255,7 @@ Widget _buildSeatsStep() {
         color: Theme.of(context).scaffoldBackgroundColor,
         child: SafeArea(
           top: false,
+          bottom: true,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Column(
@@ -1295,8 +1301,7 @@ Widget _buildSeatsStep() {
                     ),
                   ],
                 ),
-                if ((_seatData?.areaSections.isNotEmpty ?? false) &&
-                    _selectedPlaceIds.isEmpty) ...[
+                if (_purchasableAreaSections.isNotEmpty && _selectedPlaceIds.isEmpty) ...[
                   const SizedBox(height: 8),
                   Align(
                     alignment: Alignment.centerLeft,
@@ -1306,12 +1311,20 @@ Widget _buildSeatsStep() {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  ..._seatData!.areaSections.map((area) {
+                  ..._purchasableAreaSections.map((area) {
                     final currentQty = _areaSelectionMap[area.id] ?? 0;
                     final totalSelectedQty = _selectedTotalQty;
                     final unitPrice = _areaUnitPrice(area);
                     final areaTicket = _ticketInfoForArea(area);
-                    final isSoldOut = area.availableCount <= 0;
+                    // Web parity: in `ticket_info` pricing model, standing/area selection is capped by scanCount.
+                    final ticketForAreas = _effectiveAreaTicket ??
+                        (_event?.ticketInfo.isNotEmpty == true ? _event!.ticketInfo.first : null);
+                    final scanCount = ticketForAreas?.scanCount ?? 0;
+                    final isScanCountPass = _useTicketInfoPricing && scanCount > 0;
+                    final maxQty = isScanCountPass ? 1 : area.availableCount;
+
+                    final isSoldOut = maxQty <= 0;
+                    // Match web label: when not sold-out, still display backend `availableCount`.
                     final availabilityText = isSoldOut ? _tx('soldOut') : '${_tx("available")}: ${area.availableCount}';
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 6),
@@ -1337,14 +1350,14 @@ Widget _buildSeatsStep() {
                           ),
                           Text('$currentQty'),
                           IconButton(
-                            onPressed: currentQty >= area.availableCount || totalSelectedQty >= 10
+                            onPressed: currentQty >= maxQty || totalSelectedQty >= 10
                                 ? null
                                 : () {
                                     final increment = () => setState(() {
                                           final remainingSlots = 10 - (_selectedPlaceIds.length + _areaSelectionMap.values.fold<int>(0, (sum, qty) => sum + qty));
                                           if (remainingSlots <= 0) return;
                                           final nextQty = currentQty + 1;
-                                          _areaSelectionMap[area.id] = nextQty > area.availableCount ? area.availableCount : nextQty;
+                                          _areaSelectionMap[area.id] = nextQty > maxQty ? maxQty : nextQty;
                                         });
                                     if (_useTicketInfoPricing && (_event?.ticketInfo.isNotEmpty ?? false)) {
                                       _showAreaTicketTypeSelector(area, currency, increment);
@@ -1370,8 +1383,7 @@ Widget _buildSeatsStep() {
 
   void _showSelectionDetails(List<SeatModel> selectedSeats, String currency, double totalPrice) {
     final areaById = <String, AreaSectionModel>{
-      for (final area in (_seatData?.areaSections ?? const <AreaSectionModel>[]))
-        area.id: area,
+      for (final area in _purchasableAreaSections) area.id: area,
     };
     final selectedAreaEntries = _areaSelectionMap.entries.where((e) => e.value > 0).toList();
     final totalQty = _selectedTotalQty;

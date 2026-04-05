@@ -1,4 +1,5 @@
 import '../models/event.dart';
+import '../models/site_notification.dart';
 import 'api_client.dart';
 
 Future<AppData> getDataForFront() async {
@@ -49,14 +50,31 @@ Future<Event> getEventById(String id, {String? presale}) async {
 
 class AppData {
   final List<Event> events;
+  final List<SiteNotification> notifications;
 
-  AppData({this.events = const []});
+  AppData({this.events = const [], this.notifications = const []});
 
   factory AppData.fromJson(Map<String, dynamic> json) {
     final raw = json['event'] ?? json['events'];
     final list = _toEventList(raw);
+    final rawNotif = json['notification'];
+    final notifications = <SiteNotification>[];
+    if (rawNotif is List) {
+      for (final e in rawNotif) {
+        if (e is Map) {
+          try {
+            notifications.add(
+              SiteNotification.fromJson(Map<String, dynamic>.from(e)),
+            );
+          } catch (_) {
+            /* skip malformed */
+          }
+        }
+      }
+    }
     return AppData(
       events: list.map((e) => Event.fromJson(e)).toList(),
+      notifications: notifications,
     );
   }
 }

@@ -423,7 +423,9 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
           panEnabled: true,
           scaleEnabled: true,
           constrained: false,
-          clipBehavior: Clip.none,
+          // Keep seat-map rendering inside its box so it cannot visually cover
+          // the bottom CTA on devices with system navigation bars.
+          clipBehavior: Clip.hardEdge,
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
             onTapUp: (details) {
@@ -482,6 +484,41 @@ class _SeatMapPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final sortedSections = [...sections]..sort((a, b) {
+        final ai = a.isInactiveAreaHighlight ? 0 : 1;
+        final bi = b.isInactiveAreaHighlight ? 0 : 1;
+        if (ai != bi) return ai.compareTo(bi);
+        return a.id.compareTo(b.id);
+      });
+
+    for (final section in sortedSections) {
+      if (section.selectionMode != 'area') continue;
+
+      final pts = transformedSectionPolygons[section.id];
+      if (pts == null || pts.length < 3) continue;
+
+      final path = Path()
+        ..moveTo(pointTx(pts.first.dx), pointTy(pts.first.dy));
+      for (var i = 1; i < pts.length; i++) {
+        path.lineTo(pointTx(pts[i].dx), pointTy(pts[i].dy));
+      }
+      path.close();
+
+      final inactive = section.isInactiveAreaHighlight;
+      final fillPaint = Paint()
+        ..color = sectionColorWithOpacity(section.color, inactive ? 0.07 : 0.11)
+        ..style = PaintingStyle.fill;
+      canvas.drawPath(path, fillPaint);
+
+      final strokePaint = Paint()
+        ..color = inactive
+            ? const Color(0xFF6b7280)
+            : sectionColorWithOpacity(section.color, 0.88)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = inactive ? 1.2 : 1.6;
+      canvas.drawPath(path, strokePaint);
+    }
+
     final orderedSeats = [...seats]
       ..sort((a, b) {
         int priority(SeatModel seat) {

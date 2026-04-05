@@ -1,3 +1,5 @@
+import 'package:intl/intl.dart';
+
 const Map<String, String> _countryToCurrency = {
   'ad': 'eur', 'andorra': 'eur',
   'ae': 'aed', 'united arab emirates': 'aed', 'uae': 'aed',
@@ -230,10 +232,96 @@ const Map<String, String> _countryToCurrency = {
   'zw': 'zwl', 'zimbabwe': 'zwl',
 };
 
+/// ISO 3166-1 alpha-3 country codes → alpha-2 for [currencyFromCountry] lookup.
+const Map<String, String> _iso3166Alpha3ToAlpha2 = {
+  'che': 'ch',
+  'gbr': 'gb',
+  'deu': 'de',
+  'fra': 'fr',
+  'ita': 'it',
+  'esp': 'es',
+  'usa': 'us',
+  'fin': 'fi',
+  'swe': 'se',
+  'nor': 'no',
+  'dnk': 'dk',
+  'nld': 'nl',
+  'bel': 'be',
+  'aut': 'at',
+  'prt': 'pt',
+  'pol': 'pl',
+  'cze': 'cz',
+  'hun': 'hu',
+  'rou': 'ro',
+  'bgr': 'bg',
+  'hrv': 'hr',
+  'grc': 'gr',
+  'irl': 'ie',
+  'lux': 'lu',
+  'mlt': 'mt',
+  'cyp': 'cy',
+  'svk': 'sk',
+  'svn': 'si',
+  'est': 'ee',
+  'lva': 'lv',
+  'ltu': 'lt',
+};
+
+/// Mistaken alpha-3 country codes (or other 3-letter junk) → ISO 4217 for Stripe.
+const Map<String, String> _stripeCurrencyAliases = {
+  'che': 'chf',
+  'gbr': 'gbp',
+  'deu': 'eur',
+  'fra': 'eur',
+  'ita': 'eur',
+  'esp': 'eur',
+  'usa': 'usd',
+  'fin': 'eur',
+  'swe': 'sek',
+  'nor': 'nok',
+  'dnk': 'dkk',
+};
+
+/// Returns lowercase ISO 4217 suitable for Stripe PaymentIntent `currency`.
+/// Parity with web: trim, strip zero-width chars, alias by full key or letters-only (e.g. `c h e` → chf).
+String normalizeStripeCurrencyCode(String raw) {
+  var t = raw.trim();
+  if (t.isEmpty) return 'eur';
+  t = t.replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
+  final key = t.toLowerCase();
+  final lettersOnly = key.replaceAll(RegExp(r'[^a-z]'), '');
+  return _stripeCurrencyAliases[key] ?? _stripeCurrencyAliases[lettersOnly] ?? key;
+}
+
+/// ISO 4217 code for UI labels (e.g. mistaken `che` → `CHF`). Same alias map as Stripe.
+String normalizeDisplayCurrencyCode(String raw) {
+  final t = raw.trim();
+  if (t.isEmpty) return 'EUR';
+  return normalizeStripeCurrencyCode(t).toUpperCase();
+}
+
+/// Lowercase ISO 4217 from [event.country] (name, alpha-2, or mistaken alpha-3 like `CHE` → ch).
+/// Uses [_countryToCurrency] (same intent as web country→currency, without npm `currency-codes` ordering bugs).
 String currencyFromCountry(String? country) {
   if (country == null || country.isEmpty) return 'eur';
   final key = country.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-  return _countryToCurrency[key] ?? 'eur';
+  final alpha2 = _iso3166Alpha3ToAlpha2[key];
+  final resolved = alpha2 != null
+      ? (_countryToCurrency[alpha2] ?? 'eur')
+      : (_countryToCurrency[key] ?? 'eur');
+  return normalizeStripeCurrencyCode(resolved);
+}
+
+/// Display symbol (or ISO code) from a raw currency field — parity with web [getCurrencySymbolFromIsoCode].
+/// Prefer when ticket/manifest `currency` is known; use [currencySymbol] with [currencyFromCountry] for country-only APIs.
+String currencySymbolFromIsoCode(String? raw) {
+  final code = normalizeDisplayCurrencyCode(raw ?? '');
+  try {
+    final f = NumberFormat.currency(locale: 'en_US', name: code);
+    return f.currencySymbol;
+  } catch (_) {
+    return currencySymbol(code);
+  }
 }
 
 const Map<String, String> _currencySymbols = {
@@ -262,31 +350,36 @@ const Map<String, String> _currencySymbols = {
 };
 
 String currencySymbol(String currencyCode) {
-  final code = currencyCode.toLowerCase();
-  return _currencySymbols[code] ?? currencyCode.toUpperCase();
+  final normalized = normalizeStripeCurrencyCode(currencyCode);
+  final lower = normalized.toLowerCase();
+  return _currencySymbols[lower] ?? normalized.toUpperCase();
 }
 
+/// Amount first, then ISO 4217 code (web parity: `76.000 CHF`, not prefix symbol).
 String formatPrice(double amount, String currencyCode) {
-  final sym = currencySymbol(currencyCode);
-  final code = currencyCode.toLowerCase();
+  final normalizedCode = normalizeStripeCurrencyCode(currencyCode);
+  final display = normalizeDisplayCurrencyCode(currencyCode);
+  final code = normalizedCode.toLowerCase();
   const zeroDecimals = {'jpy', 'krw', 'vnd', 'cny', 'clp', 'kpw', 'pyg'};
   if (zeroDecimals.contains(code)) {
-    return '$sym${amount.toStringAsFixed(0)}';
+    return '${amount.toStringAsFixed(0)} $display';
   }
-  final normalized = _truncateFixed(amount, 3);
-  return '$sym${normalized.toStringAsFixed(3)}';
+  final truncated = _truncateFixed(amount, 3);
+  return '${truncated.toStringAsFixed(3)} $display';
 }
 
-/// Format with fixed decimals (e.g. 3 for web parity: 27.000 €, 3.645 €).
+/// Format with fixed decimals; suffix ISO code (e.g. `27.000 EUR`).
 String formatPriceWithDecimals(double amount, String currencyCode, int decimals) {
-  final sym = currencySymbol(currencyCode);
-  final normalized = _truncateFixed(amount, decimals);
-  return '$sym${normalized.toStringAsFixed(decimals)}';
+  final display = normalizeDisplayCurrencyCode(currencyCode);
+  final truncated = _truncateFixed(amount, decimals);
+  return '${truncated.toStringAsFixed(decimals)} $display';
 }
 
 double _pow10(int n) {
   double r = 1.0;
-  for (var i = 0; i < n; i++) r *= 10;
+  for (var i = 0; i < n; i++) {
+    r *= 10;
+  }
   return r;
 }
 
