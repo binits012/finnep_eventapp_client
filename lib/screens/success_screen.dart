@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 import 'dart:ui' as ui;
+import 'dart:developer' as developer;
 
 import 'package:archive/archive.dart';
 import 'package:flutter/material.dart';
@@ -12,8 +13,18 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../utils/currency.dart';
+import '../utils/share_origin.dart';
 import '../utils/place_id_decoder.dart';
+import '../utils/privacy.dart';
 import '../utils/ticket_entry_qr.dart';
+import '../widgets/legal_overflow_menu_button.dart';
+
+void debugPrint(String? message, {int? wrapWidth}) {
+  assert(() {
+    if (message != null) developer.log(message);
+    return true;
+  }());
+}
 
 class SuccessScreen extends StatefulWidget {
   const SuccessScreen({super.key, this.ticketData});
@@ -44,19 +55,6 @@ class _SuccessScreenState extends State<SuccessScreen> {
       return '';
     }
     return v.toString();
-  }
-
-  /// Obfuscate email for display: "user@domain.com" → "u***r@domain.com".
-  static String _obfuscateEmail(String email) {
-    final s = email.trim();
-    if (s.isEmpty || !s.contains('@')) return s;
-    final parts = s.split('@');
-    if (parts.length != 2) return s;
-    final local = parts[0];
-    final domain = parts[1];
-    if (local.isEmpty) return '@$domain';
-    if (local.length == 1) return '${local}***@$domain';
-    return '${local[0]}***${local[local.length - 1]}@$domain';
   }
 
   static String _formatIsoDateTimeReadable(String iso) {
@@ -90,10 +88,15 @@ class _SuccessScreenState extends State<SuccessScreen> {
     return '$section • Row ${first.row} • Seat ${first.seat} (+${decoded.length - 1} more)';
   }
 
-  String _field(Map<String, dynamic>? ticket, Map<String, dynamic>? ticketInfo, List<String> keys) {
+  String _field(
+    Map<String, dynamic>? ticket,
+    Map<String, dynamic>? ticketInfo,
+    List<String> keys,
+  ) {
     final data = widget.ticketData?['data'] as Map<String, dynamic>?;
     for (final k in keys) {
-      final v = ticketInfo?[k] ?? ticket?[k] ?? data?[k] ?? widget.ticketData?[k];
+      final v =
+          ticketInfo?[k] ?? ticket?[k] ?? data?[k] ?? widget.ticketData?[k];
       if (v != null) {
         final s = _str(v);
         if (s.isNotEmpty) return s;
@@ -115,7 +118,10 @@ class _SuccessScreenState extends State<SuccessScreen> {
             version: QrVersions.auto,
             gapless: true,
           );
-          final byteData = await painter.toImageData(size, format: ui.ImageByteFormat.png);
+          final byteData = await painter.toImageData(
+            size,
+            format: ui.ImageByteFormat.png,
+          );
           return byteData?.buffer.asUint8List();
         } catch (_) {
           return null;
@@ -130,7 +136,9 @@ class _SuccessScreenState extends State<SuccessScreen> {
       if (ro is RenderRepaintBoundary) {
         try {
           final image = await ro.toImage(pixelRatio: 3.0);
-          final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+          final byteData = await image.toByteData(
+            format: ui.ImageByteFormat.png,
+          );
           if (byteData != null) {
             files['ticket-card.png'] = byteData.buffer.asUint8List();
           }
@@ -153,10 +161,15 @@ class _SuccessScreenState extends State<SuccessScreen> {
       final showMasterQr = showMasterEntryQrOnClient(orderQty);
 
       if (showMasterQr) {
-        final payload = _resolvePrimarySharePayload();
-        final qr = await buildQrPng(payload, size: 400);
-        if (qr != null && qr.isNotEmpty) {
-          files['master-entry-qr.png'] = qr;
+        final stored = decodeServerTicketQrPng(ticket?['qrCode']);
+        if (stored != null && stored.isNotEmpty) {
+          files['master-entry-qr.png'] = stored;
+        } else {
+          final payload = _resolvePrimarySharePayload();
+          final qr = await buildQrPng(payload, size: 400);
+          if (qr != null && qr.isNotEmpty) {
+            files['master-entry-qr.png'] = qr;
+          }
         }
       } else {
         final kids = parseChildQrCodes(ticketInfo);
@@ -171,11 +184,26 @@ class _SuccessScreenState extends State<SuccessScreen> {
         }
       }
 
-      final eventTitle = _field(ticket, ticketInfo, ['eventName', 'eventTitle']);
-      final ticketName = _field(ticket, ticketInfo, ['ticketName', 'ticketType']);
-      final orderId = _field(ticket, ticketInfo, ['orderId', 'orderRef', 'reference']);
-      final purchaseDate = _field(ticket, ticketInfo, ['purchaseDate', 'createdAt']);
-      final ticketId = ticket?['_id'] != null ? _str(ticket!['_id']) : _str(widget.ticketData?['ticketId']);
+      final eventTitle = _field(ticket, ticketInfo, [
+        'eventName',
+        'eventTitle',
+      ]);
+      final ticketName = _field(ticket, ticketInfo, [
+        'ticketName',
+        'ticketType',
+      ]);
+      final orderId = _field(ticket, ticketInfo, [
+        'orderId',
+        'orderRef',
+        'reference',
+      ]);
+      final purchaseDate = _field(ticket, ticketInfo, [
+        'purchaseDate',
+        'createdAt',
+      ]);
+      final ticketId = ticket?['_id'] != null
+          ? _str(ticket!['_id'])
+          : _str(widget.ticketData?['ticketId']);
       final ticketInfoText = StringBuffer()
         ..writeln('Event: $eventTitle')
         ..writeln('Ticket: $ticketName')
@@ -183,7 +211,9 @@ class _SuccessScreenState extends State<SuccessScreen> {
         ..writeln('Order reference: $orderId')
         ..writeln('Purchase date: $purchaseDate')
         ..writeln('Quantity: $orderQty');
-      files['ticket-info.txt'] = Uint8List.fromList(utf8.encode(ticketInfoText.toString()));
+      files['ticket-info.txt'] = Uint8List.fromList(
+        utf8.encode(ticketInfoText.toString()),
+      );
 
       if (files.isEmpty) {
         errorMsg = 'Could not generate ticket files';
@@ -196,7 +226,8 @@ class _SuccessScreenState extends State<SuccessScreen> {
         if (zipBytes.isEmpty) {
           errorMsg = 'Could not create zip file';
         } else {
-          final fileName = 'ticket_bundle_${DateTime.now().millisecondsSinceEpoch}.zip';
+          final fileName =
+              'ticket_bundle_${DateTime.now().millisecondsSinceEpoch}.zip';
           String dirPath;
           try {
             final dir = await getTemporaryDirectory();
@@ -206,7 +237,10 @@ class _SuccessScreenState extends State<SuccessScreen> {
             const channel = MethodChannel('com.finnep.eventapp/cache_path');
             final path = await channel.invokeMethod<String>('getCachePath');
             if (path == null || path.isEmpty) {
-              throw PlatformException(code: 'cache_path', message: 'No cache path');
+              throw PlatformException(
+                code: 'cache_path',
+                message: 'No cache path',
+              );
             }
             dirPath = path;
           }
@@ -216,9 +250,15 @@ class _SuccessScreenState extends State<SuccessScreen> {
             errorMsg = 'Could not save zip file';
           } else {
             try {
-              await Share.shareXFiles([XFile(file.path)], text: 'My event ticket bundle');
+              await Share.shareXFiles(
+                [XFile(file.path)],
+                text: 'My event ticket bundle',
+                sharePositionOrigin: shareSheetOrigin(context),
+              );
             } catch (shareError) {
-              errorMsg = shareError is Exception ? shareError.toString().replaceFirst('Exception: ', '') : 'Share failed';
+              errorMsg = shareError is Exception
+                  ? shareError.toString().replaceFirst('Exception: ', '')
+                  : 'Share failed';
             }
           }
         }
@@ -226,13 +266,17 @@ class _SuccessScreenState extends State<SuccessScreen> {
     } catch (e, stack) {
       debugPrint('Download ticket error: $e');
       debugPrint(stack.toString());
-      final raw = e is Exception ? e.toString().replaceFirst('Exception: ', '') : 'Could not share ticket';
+      final raw = e is Exception
+          ? e.toString().replaceFirst('Exception: ', '')
+          : 'Could not share ticket';
       errorMsg = raw.length > 120 ? '${raw.substring(0, 117)}…' : raw;
     }
     if (mounted) {
       setState(() => _downloading = false);
       if (errorMsg != null) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(errorMsg)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(errorMsg)));
       }
     }
   }
@@ -258,8 +302,7 @@ class _SuccessScreenState extends State<SuccessScreen> {
       }
       return '';
     }
-    final ticketId = ticket?['_id'] != null ? _str(ticket!['_id']) : null;
-    return ticketId ?? _str(widget.ticketData?['ticketId']);
+    return purchasedTicketMongoId(ticket?['_id'] ?? ticket?['id']);
   }
 
   @override
@@ -267,14 +310,20 @@ class _SuccessScreenState extends State<SuccessScreen> {
     if (widget.ticketData == null) {
       debugPrint('[SuccessScreen] ticketData is NULL');
     } else {
-      debugPrint('[SuccessScreen] ticketData keys: ${widget.ticketData!.keys.toList()}');
-      debugPrint('[SuccessScreen] ticketData.data present: ${widget.ticketData!.containsKey('data')}');
+      debugPrint(
+        '[SuccessScreen] ticketData keys: ${widget.ticketData!.keys.toList()}',
+      );
+      debugPrint(
+        '[SuccessScreen] ticketData.data present: ${widget.ticketData!.containsKey('data')}',
+      );
     }
     final ticket = _getTicket(widget.ticketData);
     if (ticket != null) {
       debugPrint('[SuccessScreen] ticket keys: ${ticket.keys.toList()}');
       if (ticket['ticketInfo'] != null && ticket['ticketInfo'] is Map) {
-        debugPrint('[SuccessScreen] ticket.ticketInfo keys: ${(ticket['ticketInfo'] as Map).keys.toList()}');
+        debugPrint(
+          '[SuccessScreen] ticket.ticketInfo keys: ${(ticket['ticketInfo'] as Map).keys.toList()}',
+        );
       }
     } else {
       debugPrint('[SuccessScreen] ticket is null');
@@ -288,29 +337,76 @@ class _SuccessScreenState extends State<SuccessScreen> {
         ticketInfo = Map<String, dynamic>.from(ti);
       }
     }
-    debugPrint('[SuccessScreen] ticketInfo: ${ticketInfo != null ? ticketInfo.keys.toList() : null}');
+    debugPrint('[SuccessScreen] ticketInfo: ${ticketInfo?.keys.toList()}');
     final eventTitle = _field(ticket, ticketInfo, ['eventName', 'eventTitle']);
-    final eventDate = _field(ticket, ticketInfo, ['eventDate', 'date', 'startDate']);
-    final venue = _field(ticket, ticketInfo, ['venue', 'location', 'place', 'address']);
-    final ticketNameFromServer = _field(ticket, ticketInfo, ['ticketName', 'ticketType', 'tier']);
-    final ticketForRaw = _field(ticket, ticketInfo, ['email', 'attendeeEmail', 'ticketForEmail', 'ticketFor', 'attendee']);
+    final eventDate = _field(ticket, ticketInfo, [
+      'eventDate',
+      'date',
+      'startDate',
+    ]);
+    final venue = _field(ticket, ticketInfo, [
+      'venue',
+      'location',
+      'place',
+      'address',
+    ]);
+    final ticketNameFromServer = _field(ticket, ticketInfo, [
+      'ticketName',
+      'ticketType',
+      'tier',
+    ]);
+    final ticketForRaw = _field(ticket, ticketInfo, [
+      'email',
+      'attendeeEmail',
+      'ticketForEmail',
+      'ticketFor',
+      'attendee',
+    ]);
     final clientEmail = _str(widget.ticketData?['_clientEmail']);
     final attendee = (clientEmail.contains('@') ? clientEmail : ticketForRaw);
     // Prefer client-provided ticket name (e.g. tier name) when server sends a generic one like "New Ticket".
     final clientTicketName = _str(widget.ticketData?['_clientTicketName']);
     // Seat location label is displayed separately from ticket type.
     final clientPlaceIdsRaw = widget.ticketData?['_clientPlaceIds'];
-    final clientPlaceIds = clientPlaceIdsRaw is List ? clientPlaceIdsRaw.map((e) => _str(e)).where((e) => e.isNotEmpty).toList() : const <String>[];
-    final ticketSeatLabel = clientPlaceIds.isNotEmpty ? _seatLabelFromPlaceIds(clientPlaceIds) : '';
-    final ticketName = clientTicketName.isNotEmpty ? clientTicketName : ticketNameFromServer;
-    final orderId = _field(ticket, ticketInfo, ['orderId', 'orderRef', 'reference']);
+    final clientPlaceIds = clientPlaceIdsRaw is List
+        ? clientPlaceIdsRaw
+              .map((e) => _str(e))
+              .where((e) => e.isNotEmpty)
+              .toList()
+        : const <String>[];
+    final ticketSeatLabel = clientPlaceIds.isNotEmpty
+        ? _seatLabelFromPlaceIds(clientPlaceIds)
+        : '';
+    final ticketName = clientTicketName.isNotEmpty
+        ? clientTicketName
+        : ticketNameFromServer;
+    final orderId = _field(ticket, ticketInfo, [
+      'orderId',
+      'orderRef',
+      'reference',
+    ]);
     // For your response shape, the real timestamp is `data.createdAt`.
-    final purchaseDate = _field(ticket, ticketInfo, ['purchaseDate', 'createdAt', 'created']);
-    final purchaseDateDisplay = purchaseDate.isNotEmpty ? _formatIsoDateTimeReadable(purchaseDate) : '';
+    final purchaseDate = _field(ticket, ticketInfo, [
+      'purchaseDate',
+      'createdAt',
+      'created',
+    ]);
+    final purchaseDateDisplay = purchaseDate.isNotEmpty
+        ? _formatIsoDateTimeReadable(purchaseDate)
+        : '';
     final quantity = _field(ticket, ticketInfo, ['quantity', 'qty']);
     // For your response shape, the entry code is `data.otp`.
-    final entryCode = _field(ticket, ticketInfo, ['otp', 'entryCode', 'ticketCode', 'code']);
-    final totalPaidRaw = _field(ticket, ticketInfo, ['totalPaid', 'total', 'amount']);
+    final entryCode = _field(ticket, ticketInfo, [
+      'otp',
+      'entryCode',
+      'ticketCode',
+      'code',
+    ]);
+    final totalPaidRaw = _field(ticket, ticketInfo, [
+      'totalPaid',
+      'total',
+      'amount',
+    ]);
     final price = _field(ticket, ticketInfo, ['price']);
     final currency = _field(ticket, ticketInfo, ['currency']);
 
@@ -318,74 +414,129 @@ class _SuccessScreenState extends State<SuccessScreen> {
     // (e.g. 30.645) don't show up as 30.65 here.
     final clientCurrency = _str(widget.ticketData?['_clientCurrency']);
     final clientOverride = widget.ticketData?['_clientTotalAmountOverride'];
-    final clientOverrideNum = clientOverride is num ? clientOverride.toDouble() : double.tryParse(_str(clientOverride));
+    final clientOverrideNum = clientOverride is num
+        ? clientOverride.toDouble()
+        : double.tryParse(_str(clientOverride));
     final clientCents = widget.ticketData?['_clientTotalCents'];
-    final clientCentsNum = clientCents is num ? clientCents.toInt() : int.tryParse(_str(clientCents));
-    final clientTotalDisplay = clientOverrideNum != null && clientOverrideNum > 0
-        ? formatPriceWithDecimals(clientOverrideNum, clientCurrency.isNotEmpty ? clientCurrency : (currency.isNotEmpty ? currency : 'eur'), 3)
+    final clientCentsNum = clientCents is num
+        ? clientCents.toInt()
+        : int.tryParse(_str(clientCents));
+    final displayCurrency = clientCurrency.isNotEmpty
+        ? clientCurrency
+        : (currency.isNotEmpty ? currency : 'eur');
+    final clientTotalDisplay =
+        clientOverrideNum != null && clientOverrideNum > 0
+        ? formatFinalTotal(clientOverrideNum, displayCurrency)
         : (clientCentsNum != null && clientCentsNum > 0)
-            ? formatPriceWithDecimals(clientCentsNum / 100.0, clientCurrency.isNotEmpty ? clientCurrency : (currency.isNotEmpty ? currency : 'eur'), 2)
-            : '';
+        ? formatFinalTotal(clientCentsNum / 100.0, displayCurrency)
+        : '';
 
     final totalPaid = clientTotalDisplay.isNotEmpty
         ? clientTotalDisplay
         : totalPaidRaw.isNotEmpty
-            ? totalPaidRaw
-            : (price.isNotEmpty && currency.isNotEmpty)
-                ? '$price ${normalizeDisplayCurrencyCode(currency)}'
-                : price.isNotEmpty
-                    ? price
-                    : '';
-    final ticketId = ticket?['_id'] != null ? _str(ticket!['_id']) : _str(widget.ticketData?['ticketId']);
-    final qrPayload = ticketId.isNotEmpty ? ticketId : '';
+        ? totalPaidRaw
+        : (price.isNotEmpty && currency.isNotEmpty)
+        ? '$price ${normalizeDisplayCurrencyCode(currency)}'
+        : price.isNotEmpty
+        ? price
+        : '';
+    final ticketId = purchasedTicketMongoId(ticket?['_id'] ?? ticket?['id']);
+    final storedQrPng = decodeServerTicketQrPng(ticket?['qrCode']);
+    final qrPayload = ticketId;
     final orderQty = parseTicketOrderQuantity(quantity, ticketInfo);
     final showMasterQr = showMasterEntryQrOnClient(orderQty);
     final childQrCodes = parseChildQrCodes(ticketInfo);
     final canSaveOrShareQr =
-        (showMasterQr && qrPayload.isNotEmpty) || (!showMasterQr && childQrCodes.isNotEmpty);
+        (showMasterQr && (storedQrPng != null || qrPayload.isNotEmpty)) ||
+        (!showMasterQr && childQrCodes.isNotEmpty);
 
-    debugPrint('[SuccessScreen] eventTitle="$eventTitle" eventDate="$eventDate" venue="$venue" ticketName="$ticketName"');
-    debugPrint('[SuccessScreen] attendee="$attendee" orderId="$orderId" purchaseDate="$purchaseDate" totalPaid="$totalPaid"');
+    debugPrint(
+      '[SuccessScreen] eventTitle="$eventTitle" eventDate="$eventDate" venue="$venue" ticketName="$ticketName"',
+    );
+    final attendeeForLog = attendee.contains('@')
+        ? maskEmailForDisplay(attendee)
+        : attendee;
+    debugPrint(
+      '[SuccessScreen] attendee="$attendeeForLog" orderId="$orderId" purchaseDate="$purchaseDate" totalPaid="$totalPaid"',
+    );
 
     final scheme = Theme.of(context).colorScheme;
     final labelColor = scheme.onSurfaceVariant;
     final valueColor = scheme.onSurface;
-    Widget _infoRow(String label, String value) {
+    Widget infoRow(String label, String value) {
       if (value.isEmpty) return const SizedBox.shrink();
       return Padding(
         padding: const EdgeInsets.only(bottom: 6),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SizedBox(width: 100, child: Text('$label:', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: labelColor))),
-            Expanded(child: Text(value, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: valueColor))),
+            SizedBox(
+              width: 100,
+              child: Text(
+                '$label:',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: labelColor),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: valueColor),
+              ),
+            ),
           ],
         ),
       );
     }
 
     final infoChildren = <Widget>[
-      if (eventTitle.isNotEmpty) Text(eventTitle, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, color: valueColor)),
-      if (eventDate.isNotEmpty) _infoRow('Date', eventDate),
-      if (venue.isNotEmpty) _infoRow('Venue', venue),
-      if (ticketName.isNotEmpty) _infoRow('Ticket', ticketName),
-      if (ticketSeatLabel.isNotEmpty) _infoRow('Seating', ticketSeatLabel),
-      if (totalPaid.isNotEmpty) _infoRow('Total', totalPaid),
-      if (attendee.isNotEmpty) _infoRow('Attendee', attendee.contains('@') ? _obfuscateEmail(attendee) : attendee),
-      if (quantity.isNotEmpty) _infoRow('Qty', quantity),
-      if (orderId.isNotEmpty || ticketId.isNotEmpty || purchaseDate.isNotEmpty) ...[
+      if (eventTitle.isNotEmpty)
+        Text(
+          eventTitle,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: valueColor,
+          ),
+        ),
+      if (eventDate.isNotEmpty) infoRow('Date', eventDate),
+      if (venue.isNotEmpty) infoRow('Venue', venue),
+      if (ticketName.isNotEmpty) infoRow('Ticket', ticketName),
+      if (ticketSeatLabel.isNotEmpty) infoRow('Seating', ticketSeatLabel),
+      if (totalPaid.isNotEmpty) infoRow('Total', totalPaid),
+      if (attendee.isNotEmpty)
+        infoRow(
+          'Attendee',
+          attendee.contains('@') ? maskEmailForDisplay(attendee) : attendee,
+        ),
+      if (quantity.isNotEmpty) infoRow('Qty', quantity),
+      if (orderId.isNotEmpty ||
+          ticketId.isNotEmpty ||
+          purchaseDate.isNotEmpty) ...[
         const SizedBox(height: 12),
-        Text('Order Information', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold, color: valueColor)),
+        Text(
+          'Order Information',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.bold,
+            color: valueColor,
+          ),
+        ),
       ],
-      if (orderId.isNotEmpty) _infoRow('Order', orderId),
-      if (entryCode.isNotEmpty) _infoRow('Entry code', entryCode),
-      if (purchaseDateDisplay.isNotEmpty) _infoRow('Purchased', purchaseDateDisplay),
+      if (orderId.isNotEmpty) infoRow('Order', orderId),
+      if (entryCode.isNotEmpty) infoRow('Entry code', entryCode),
+      if (purchaseDateDisplay.isNotEmpty)
+        infoRow('Purchased', purchaseDateDisplay),
     ];
 
     debugPrint('[SuccessScreen] infoChildren.length=${infoChildren.length}');
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Success')),
+      appBar: AppBar(
+        title: const Text('Success'),
+        actions: const [LegalOverflowMenuButton()],
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -397,11 +548,16 @@ class _SuccessScreenState extends State<SuccessScreen> {
               child: Text(
                 'Payment successful',
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: scheme.onSurface),
+                style: Theme.of(
+                  context,
+                ).textTheme.headlineSmall?.copyWith(color: scheme.onSurface),
               ),
             ),
             const SizedBox(height: 16),
-            if (infoChildren.isNotEmpty || (showMasterQr && qrPayload.isNotEmpty) || (!showMasterQr && childQrCodes.isNotEmpty))
+            if (infoChildren.isNotEmpty ||
+                (showMasterQr &&
+                    (storedQrPng != null || qrPayload.isNotEmpty)) ||
+                (!showMasterQr && childQrCodes.isNotEmpty))
               RepaintBoundary(
                 key: _ticketKey,
                 child: Container(
@@ -422,13 +578,15 @@ class _SuccessScreenState extends State<SuccessScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       if (infoChildren.isNotEmpty) ...infoChildren,
-                      if (showMasterQr && qrPayload.isNotEmpty) ...[
+                      if (showMasterQr &&
+                          (storedQrPng != null || qrPayload.isNotEmpty)) ...[
                         const SizedBox(height: 24),
                         Center(
                           child: Text(
                             'Your ticket',
                             textAlign: TextAlign.center,
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(color: scheme.onSurface),
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(color: scheme.onSurface),
                           ),
                         ),
                         const SizedBox(height: 12),
@@ -439,24 +597,40 @@ class _SuccessScreenState extends State<SuccessScreen> {
                               color: Colors.white,
                               borderRadius: BorderRadius.circular(12),
                             ),
-                            child: QrImageView(
-                              data: qrPayload,
-                              version: QrVersions.auto,
-                              size: 200,
-                              backgroundColor: Colors.white,
-                            ),
+                            child: storedQrPng != null
+                                ? Image.memory(
+                                    storedQrPng,
+                                    width: 200,
+                                    height: 200,
+                                    gaplessPlayback: true,
+                                  )
+                                : QrImageView(
+                                    data: qrPayload,
+                                    version: QrVersions.auto,
+                                    size: 200,
+                                    backgroundColor: Colors.white,
+                                  ),
                           ),
                         ),
                       ],
-                      if (!showMasterQr && childQrCodes.isNotEmpty) _buildGuestQrSection(context, childQrCodes, scheme),
+                      if (!showMasterQr && childQrCodes.isNotEmpty)
+                        _buildGuestQrSection(context, childQrCodes, scheme),
                     ],
                   ),
                 ),
               ),
             const SizedBox(height: 32),
             ElevatedButton.icon(
-              onPressed: canSaveOrShareQr && !_downloading ? _downloadTicket : null,
-              icon: _downloading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.download),
+              onPressed: canSaveOrShareQr && !_downloading
+                  ? _downloadTicket
+                  : null,
+              icon: _downloading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.download),
               label: Text(_downloading ? 'Preparing…' : 'Download ticket'),
             ),
             const SizedBox(height: 8),
@@ -471,7 +645,11 @@ class _SuccessScreenState extends State<SuccessScreen> {
     );
   }
 
-  Widget _buildGuestQrSection(BuildContext context, List<Map<String, dynamic>> children, ColorScheme scheme) {
+  Widget _buildGuestQrSection(
+    BuildContext context,
+    List<Map<String, dynamic>> children,
+    ColorScheme scheme,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -480,7 +658,9 @@ class _SuccessScreenState extends State<SuccessScreen> {
           child: Text(
             'Entry codes for each guest',
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(color: scheme.onSurface),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(color: scheme.onSurface),
           ),
         ),
         const SizedBox(height: 8),
@@ -488,7 +668,9 @@ class _SuccessScreenState extends State<SuccessScreen> {
           child: Text(
             'Each guest should show their own code at the entrance.',
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
           ),
         ),
         ...children.asMap().entries.map((e) {
@@ -503,7 +685,10 @@ class _SuccessScreenState extends State<SuccessScreen> {
               children: [
                 Text(
                   'Guest $idx',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600, color: scheme.onSurface),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurface,
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Center(

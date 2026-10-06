@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 import 'api_client.dart';
 
 /// Register for a free event (no payment). Matches web POST front/free-event-register.
@@ -13,6 +11,7 @@ Future<void> registerFreeEvent({
   required String eventName,
   required String ticketName,
   bool marketingOptIn = false,
+  Map<String, dynamic>? registrationAnswers,
 }) async {
   final body = <String, dynamic>{
     'email': email.trim(),
@@ -25,9 +24,10 @@ Future<void> registerFreeEvent({
     'ticketName': ticketName,
     'marketingOptIn': marketingOptIn,
   };
+  if (registrationAnswers != null && registrationAnswers.isNotEmpty) {
+    body['registrationAnswers'] = registrationAnswers;
+  }
 
-  debugPrint('[FreeEvent] POST /front/free-event-register payload: $body');
   final response = await apiPost('/free-event-register', body: body);
-  debugPrint('[FreeEvent] response status=${response.statusCode} body=${response.body}');
   throwIfNotOk(response);
 }

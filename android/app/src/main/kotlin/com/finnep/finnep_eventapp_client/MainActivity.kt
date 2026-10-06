@@ -1,4 +1,4 @@
-package com.finnep.finnep_eventapp_client
+package com.okazzo.client
 
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine

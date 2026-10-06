@@ -29,6 +29,9 @@ class Event {
   final int? preSaleWaitlistCap;
   final Map<String, dynamic>? otherInfo;
 
+  /// From public API when true.
+  final bool hasDiscountCodes;
+
   Event({
     required this.id,
     required this.eventTitle,
@@ -57,6 +60,7 @@ class Event {
     this.preSaleWaitlistCount,
     this.preSaleWaitlistCap,
     this.otherInfo,
+    this.hasDiscountCodes = false,
   });
 
   factory Event.fromJson(Map<String, dynamic> json) {
@@ -98,28 +102,36 @@ class Event {
       isSeatedEventFromApi: _boolOrNull(json, 'isSeatedEvent'),
       hasSeatSelectionFromApi: _boolOrNull(json, 'hasSeatSelection'),
       waitlistConfig: _mapFrom(json['waitlistConfig']),
-      preSaleWaitlistCount: (json['pre_sale_waitlist_count'] is num) ? (json['pre_sale_waitlist_count'] as num).toInt() : null,
-      preSaleWaitlistCap: (json['pre_sale_waitlist_cap'] is num) ? (json['pre_sale_waitlist_cap'] as num).toInt() : null,
-      otherInfo: _mapFrom(json['otherInfo']),
+      preSaleWaitlistCount: (json['pre_sale_waitlist_count'] is num)
+          ? (json['pre_sale_waitlist_count'] as num).toInt()
+          : null,
+      preSaleWaitlistCap: (json['pre_sale_waitlist_cap'] is num)
+          ? (json['pre_sale_waitlist_cap'] as num).toInt()
+          : null,
+      otherInfo: _mergedOtherInfoFromJson(json),
+      hasDiscountCodes: json['hasDiscountCodes'] == true,
     );
   }
 
-  /// Aligns with web (test.okazzo.eu): venue.venueId / lockedManifestId / pricing_configuration.
-  /// Also uses root-level hasSeatSelection if API sends it.
+  /// Seated storefront flow: manifests, pricing_configuration, or explicit flags—not `venueId` alone.
   bool get hasSeatSelection {
-    if (isSeatedEventFromApi != null) return isSeatedEventFromApi == true;
+    if (isSeatedEventFromApi == true) return true;
     if (hasSeatSelectionFromApi == true) return true;
     final v = venue;
-    if (v == null) return false;
-    if ((v.manifestVersion ?? 0) > 0) return true;
-    if (v.venueId != null && v.venueId!.trim().isNotEmpty) return true;
-    if (v.lockedManifestId != null && v.lockedManifestId!.trim().isNotEmpty) return true;
-    if (v.hasSeatSelection == true) return true;
-    if (v.pricingModel == 'pricing_configuration') return true;
+    if (v != null && v.hasSeatSelection == true) return true;
+    final mv = v?.manifestVersion ?? 0;
+    if (mv > 0) return true;
+    final locked = (v?.lockedManifestId ?? '').trim();
+    if (locked.isNotEmpty) return true;
+    if (v?.pricingModel == 'pricing_configuration') return true;
     return false;
   }
 
-  /// Pre-sale when waitlistConfig.pre_sale_enabled; sold_out when sold_out_enabled and at least one ticket sold out.
+  List<TicketInfo> get customerVisibleTicketInfo => ticketInfo
+      .where((t) => !isTicketHiddenFromCustomer(t.status))
+      .toList(growable: false);
+
+  /// Pre_sale / sold_out waitlist modes from CMS config + ticket flags.
   String? get waitlistOffer {
     final wc = waitlistConfig;
     final eventType = otherInfo?['eventExtraInfo'] is Map
@@ -127,9 +139,24 @@ class Event {
         : null;
     if (wc == null || eventType == 'free') return null;
     if (wc['pre_sale_enabled'] == true) return 'pre_sale';
-    final hasSoldOut = ticketInfo.any((t) => t.status == 'sold_out');
+    final hasSoldOut = customerVisibleTicketInfo.any(
+      (t) => t.status == 'sold_out',
+    );
     if (wc['sold_out_enabled'] == true && hasSoldOut) return 'sold_out';
     return null;
+  }
+
+  /// Listing cards must not show a ticket price while sales are closed.
+  /// Pre-sale always hides the price. Sold-out waitlist hides it when no
+  /// visible ticket is still available or low stock.
+  bool get isListingOnWaitlist {
+    final offer = waitlistOffer;
+    if (offer == 'pre_sale') return true;
+    if (offer != 'sold_out') return false;
+    final hasOnSale = customerVisibleTicketInfo.any(
+      (ticket) => ticket.status == 'available' || ticket.status == 'low_stock',
+    );
+    return !hasOnSale;
   }
 
   /// True when pre-sale waitlist has a cap and current count has reached it.
@@ -141,25 +168,132 @@ class Event {
     return count >= cap;
   }
 
-  /// True when event is free (no payment). Aligns with web: otherInfo.eventExtraInfo.eventType === 'free'.
+  /// Free event: `eventType === 'free'` or all visible tickets price 0.
   bool get isFreeEvent {
     final eventType = otherInfo?['eventExtraInfo'] is Map
         ? (otherInfo?['eventExtraInfo'] as Map)['eventType']
         : null;
     if (eventType == 'free') return true;
-    if (ticketInfo.isEmpty) return false;
-    return ticketInfo.every((t) => t.price == 0);
+    if (customerVisibleTicketInfo.isEmpty) return false;
+    return customerVisibleTicketInfo.every((t) => t.price == 0);
   }
 
-  /// True when all tickets are sold out (status sold_out or available 0). Do not allow checkout when true unless waitlist is offered.
+  /// Matches web `events` / event detail helpers:
+  /// `event?.otherInfo?.isExternalEvent === true`.
+  ///
+  /// Use [suppressesMerchantAndPriceMarkersLikeWebHome] for homepage cards —
+  /// the web homepage uses ordinary JS truthiness on that flag (`!flag`).
+  bool get isExternalEvent => otherInfo?['isExternalEvent'] == true;
+
+  /// Homepage parity: `event.otherInfo?.isExternalEvent` is treated as falsy /
+  /// truthy like plain JavaScript (web `HomePage` organizer + price chips).
+  bool get suppressesMerchantAndPriceMarkersLikeWebHome =>
+      _javascriptTruthy(otherInfo?['isExternalEvent']);
+
+  /// Web `EventDetail` external CTA anchor: `event.otherInfo.externalEventDetails`.
+  /// Only http(s); optional snake_case fallback for payloads.
+  String? get webExternalTicketUrl {
+    final oi = otherInfo;
+    if (oi == null) return null;
+
+    bool isHttpUrl(String value) =>
+        value.startsWith('http://') || value.startsWith('https://');
+
+    String? coerce(dynamic raw) {
+      final value = raw?.toString().trim();
+      if (value != null && value.isNotEmpty && isHttpUrl(value)) {
+        return value;
+      }
+      return null;
+    }
+
+    return coerce(oi['externalEventDetails']) ??
+        coerce(oi['external_event_details']);
+  }
+
+  /// Resolved external ticket URL (extraInfo/otherInfo).
+  String? get externalTicketUrl {
+    final extraInfo = otherInfo?['eventExtraInfo'] is Map
+        ? Map<String, dynamic>.from(otherInfo!['eventExtraInfo'] as Map)
+        : const <String, dynamic>{};
+    final root = otherInfo ?? const <String, dynamic>{};
+
+    String? pick(Map<String, dynamic> map, List<String> keys) {
+      for (final key in keys) {
+        final raw = map[key];
+        final value = raw?.toString().trim();
+        if (value != null &&
+            value.isNotEmpty &&
+            (value.startsWith('http://') || value.startsWith('https://'))) {
+          return value;
+        }
+      }
+      return null;
+    }
+
+    const candidates = <String>[
+      'externalEventDetails',
+      'external_event_details',
+      'externalTicketUrl',
+      'external_ticket_url',
+      'ticketUrl',
+      'ticket_url',
+      'externalUrl',
+      'external_url',
+      'bookingUrl',
+      'booking_url',
+    ];
+
+    return pick(extraInfo, candidates) ?? pick(root, candidates);
+  }
+
+  /// With seat maps, rely on seat inventory; otherwise every visible ticket row is depleted.
   bool get isSoldOut {
-    if (ticketInfo.isEmpty) return false;
-    return ticketInfo.every((t) =>
-        t.status == 'sold_out' || (t.available != null && t.available! <= 0));
+    if (hasSeatSelection) return false;
+    if (customerVisibleTicketInfo.isEmpty) return false;
+    return customerVisibleTicketInfo.every(
+      (t) =>
+          t.status == 'sold_out' || (t.available != null && t.available! <= 0),
+    );
   }
 }
 
-/// Safely convert any Map to Map<String, dynamic> for fromJson.
+bool isTicketHiddenFromCustomer(String? status) =>
+    status == 'inactive' || status == 'disabled';
+
+/// Mirrors JavaScript truthiness used on web homepage for external listings.
+bool _javascriptTruthy(dynamic v) {
+  if (v == null || v == false) {
+    return false;
+  }
+  if (v == true) {
+    return true;
+  }
+  if (v is num) {
+    if (v is double && v.isNaN) {
+      return false;
+    }
+    return v != 0;
+  }
+  if (v is String) {
+    final s = v.trim().toLowerCase();
+    if (s.isEmpty) return false;
+    const falsyWords = {'false', 'no', '0', 'undefined', 'null', 'off'};
+    return !falsyWords.contains(s);
+  }
+  return true;
+}
+
+/// Merges `otherInfo` and `other_info` (camelCase wins on collisions).
+Map<String, dynamic>? _mergedOtherInfoFromJson(Map<String, dynamic> json) {
+  final c = _mapFrom(json['otherInfo']);
+  final s = _mapFrom(json['other_info']);
+  if (c == null) return s;
+  if (s == null) return c;
+  return <String, dynamic>{...s, ...c};
+}
+
+/// Safely convert any map to `Map<String, dynamic>` for fromJson.
 Map<String, dynamic>? _mapFrom(dynamic v) {
   if (v == null) return null;
   if (v is Map) return Map<String, dynamic>.from(v);
@@ -185,10 +319,10 @@ class VenueInfo {
   VenueInfo({this.name, this.description, this.website});
 
   factory VenueInfo.fromJson(Map<String, dynamic> json) => VenueInfo(
-        name: _str(json['name']),
-        description: _str(json['description']),
-        website: _str(json['media']?['website']) ?? _str(json['website']),
-      );
+    name: _str(json['name']),
+    description: _str(json['description']),
+    website: _str(json['media']?['website']) ?? _str(json['website']),
+  );
 }
 
 class Venue {
@@ -209,13 +343,15 @@ class Venue {
   });
 
   factory Venue.fromJson(Map<String, dynamic> json) => Venue(
-        name: _str(json['name']),
-        venueId: _venueIdFromJson(json['venueId']),
-        hasSeatSelection: json['hasSeatSelection'] == true,
-        lockedManifestId: _str(json['lockedManifestId']),
-        pricingModel: _str(json['pricingModel']),
-        manifestVersion: (json['manifestVersion'] is num) ? (json['manifestVersion'] as num).toInt() : null,
-      );
+    name: _str(json['name']),
+    venueId: _venueIdFromJson(json['venueId']),
+    hasSeatSelection: json['hasSeatSelection'] == true,
+    lockedManifestId: _str(json['lockedManifestId']),
+    pricingModel: _str(json['pricingModel']),
+    manifestVersion: (json['manifestVersion'] is num)
+        ? (json['manifestVersion'] as num).toInt()
+        : null,
+  );
 }
 
 /// Handles venueId as string or MongoDB-style object (e.g. {"\$oid": "..."}).
@@ -232,6 +368,7 @@ class TicketInfo {
   final String name;
   final double price;
   final int quantity;
+
   /// For recurring/season passes:
   /// total number of entries/scans allowed for a single purchased pass (QR).
   /// When present (>0), checkout should lock quantity to `1`.
@@ -260,34 +397,36 @@ class TicketInfo {
   });
 
   factory TicketInfo.fromJson(Map<String, dynamic> json) => TicketInfo(
-        id: _str(json['_id']) ?? '',
-        name: _str(json['name']) ?? '',
-        price: _toDouble(json['price']) ?? 0,
-        quantity: (json['quantity'] is num) ? (json['quantity'] as num).toInt() : 1,
+    id: _str(json['_id']) ?? '',
+    name: _str(json['name']) ?? '',
+    price: _toDouble(json['price']) ?? 0,
+    quantity: (json['quantity'] is num) ? (json['quantity'] as num).toInt() : 1,
     scanCount: (json['scanCount'] is num)
         ? (json['scanCount'] as num).toInt()
         : (json['scan_count'] is num)
-            ? (json['scan_count'] as num).toInt()
-            : (json['scanCount'] != null || json['scan_count'] != null)
-                ? int.tryParse((json['scanCount'] ?? json['scan_count']).toString())
-                : null,
-        available: (json['available'] is num) ? (json['available'] as num).toInt() : null,
-        serviceFee: _toDouble(json['serviceFee']),
-        entertainmentTax: _toDouble(json['entertainmentTax']),
-        serviceTax: _toDouble(json['serviceTax']),
-        orderFee: _toDouble(json['orderFee']),
-        vat: _toDouble(json['vat']),
-        status: _str(json['status']),
-      );
+        ? (json['scan_count'] as num).toInt()
+        : (json['scanCount'] != null || json['scan_count'] != null)
+        ? int.tryParse((json['scanCount'] ?? json['scan_count']).toString())
+        : null,
+    available: (json['available'] is num)
+        ? (json['available'] as num).toInt()
+        : null,
+    serviceFee: _toDouble(json['serviceFee']),
+    entertainmentTax: _toDouble(json['entertainmentTax']),
+    serviceTax: _toDouble(json['serviceTax']),
+    orderFee: _toDouble(json['orderFee']),
+    vat: _toDouble(json['vat']),
+    status: _str(json['status']),
+  );
 
   TicketPriceBreakdown get _priceBreakdown => calculateTicketPrice(
-        price: price,
-        vat: vat,
-        entertainmentTax: entertainmentTax,
-        serviceTax: serviceTax,
-        serviceFee: serviceFee,
-        orderFee: orderFee,
-      );
+    price: price,
+    vat: vat,
+    entertainmentTax: entertainmentTax,
+    serviceTax: serviceTax,
+    serviceFee: serviceFee,
+    orderFee: orderFee,
+  );
 
   double get vatRate => _priceBreakdown.vatRate;
   double get vatAmountPerTicket => _priceBreakdown.vatAmountPerTicket;
@@ -320,14 +459,14 @@ class Merchant {
   });
 
   factory Merchant.fromJson(Map<String, dynamic> json) => Merchant(
-        id: _str(json['_id']),
-        name: _str(json['name']),
-        logo: _str(json['logo']),
-        website: _str(json['website']),
-        merchantId: _str(json['merchantId']),
-        stripeAccount: _str(json['stripeAccount']),
-        paytrailEnabled: json['paytrailEnabled'] == true,
-      );
+    id: _str(json['_id']),
+    name: _str(json['name']),
+    logo: _str(json['logo']),
+    website: _str(json['website']),
+    merchantId: _str(json['merchantId']),
+    stripeAccount: _str(json['stripeAccount']),
+    paytrailEnabled: json['paytrailEnabled'] == true,
+  );
 }
 
 String? _str(dynamic v) {
@@ -348,15 +487,11 @@ class Featured {
   final String? featuredType;
   final int priority;
 
-  Featured({
-    this.isFeatured = false,
-    this.featuredType,
-    this.priority = 0,
-  });
+  Featured({this.isFeatured = false, this.featuredType, this.priority = 0});
 
   factory Featured.fromJson(Map<String, dynamic> json) => Featured(
-        isFeatured: json['isFeatured'] == true,
-        featuredType: _str(json['featuredType']),
-        priority: (json['priority'] is num) ? (json['priority'] as num).toInt() : 0,
-      );
+    isFeatured: json['isFeatured'] == true,
+    featuredType: _str(json['featuredType']),
+    priority: (json['priority'] is num) ? (json['priority'] as num).toInt() : 0,
+  );
 }

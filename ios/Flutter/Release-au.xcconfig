@@ -1,0 +1,5 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.release-au.xcconfig"
+#include "Release.xcconfig"
+#include "DartDefines-au.xcconfig"
+PRODUCT_BUNDLE_IDENTIFIER = $(AU_BUNDLE_ID)
+INFOPLIST_KEY_CFBundleDisplayName = $(AU_DISPLAY_NAME)

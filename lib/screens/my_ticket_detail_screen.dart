@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
@@ -7,8 +9,17 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../models/ticket.dart';
 import '../services/guest_service.dart';
 import '../utils/currency.dart';
+import '../utils/money.dart';
 import '../utils/place_id_decoder.dart';
 import '../utils/ticket_entry_qr.dart';
+import '../widgets/legal_overflow_menu_button.dart';
+
+void debugPrint(String? message, {int? wrapWidth}) {
+  assert(() {
+    if (message != null) developer.log(message);
+    return true;
+  }());
+}
 
 class MyTicketDetailScreen extends StatefulWidget {
   const MyTicketDetailScreen({super.key, required this.ticketId});
@@ -32,10 +43,49 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     return double.tryParse(s);
   }
 
+  Map<String, dynamic>? _extractTicketInfoMap(GuestTicket t) {
+    final raw = t.raw;
+    if (raw == null) return null;
+    final ticketInfo = raw['ticketInfo'];
+    if (ticketInfo is Map<String, dynamic>) return ticketInfo;
+    if (ticketInfo is Map) return Map<String, dynamic>.from(ticketInfo);
+    return null;
+  }
+
+  /// First non-null money value from [ticketInfo] then [raw] for the given keys.
+  double? _firstMoney(
+    Map<String, dynamic>? ticketInfo,
+    Map<String, dynamic>? raw,
+    List<String> keys,
+  ) {
+    for (final key in keys) {
+      if (ticketInfo != null) {
+        final fromInfo = _toDouble(ticketInfo[key]);
+        if (fromInfo != null) return fromInfo;
+      }
+    }
+    if (raw == null) return null;
+    for (final key in keys) {
+      final fromRaw = _toDouble(raw[key]);
+      if (fromRaw != null) return fromRaw;
+    }
+    return null;
+  }
+
+  String _moneyAmountLabel(double? amount) {
+    if (amount == null) return '';
+    return roundMoney(amount).toStringAsFixed(2);
+  }
+
   String _formatMoney(double? amount, String currency) {
     if (amount == null) return '';
     final c = normalizeDisplayCurrencyCode(currency.trim().isNotEmpty ? currency : 'EUR');
-    return '${amount.toStringAsFixed(3)} $c';
+    return '${roundMoney(amount).toStringAsFixed(2)} $c';
+  }
+
+  String _withCurrency(String amountStr, String currency) {
+    if (amountStr.isEmpty) return '';
+    return currency.isNotEmpty ? '$amountStr $currency' : amountStr;
   }
 
   double? _resolveVatAmount(dynamic basePriceRaw, dynamic taxRaw) {
@@ -48,6 +98,26 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
       return base * (tax / 100);
     }
     return tax;
+  }
+
+  double? _resolveSeatServiceTax(Map<String, dynamic> pricing) {
+    final explicit = _toDouble(
+      pricing['serviceTaxAmount'] ?? pricing['serviceTax'],
+    );
+    if (explicit != null) {
+      // Rate percent (0–100) with no money amount key → compute from service fee.
+      final asRateKey = pricing['serviceTaxAmount'] == null &&
+          pricing['serviceTax'] != null &&
+          explicit > 0 &&
+          explicit <= 100;
+      if (asRateKey) {
+        final fee = _toDouble(pricing['serviceFee']) ?? 0;
+        if (fee > 0) return moneyPercentOf(fee, explicit);
+        return null;
+      }
+      return explicit;
+    }
+    return null;
   }
 
   String _formatDateReadable(String? raw) {
@@ -144,20 +214,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
   }
 
   Widget _buildQrWidget(BuildContext context, GuestTicket t) {
-    final extractedQrPayload = _extractField(
-      t.raw,
-      [
-        'ticketId',
-        'qrPayload',
-        'qr',
-        'ticketCode',
-        'otp',
-        'entryCode',
-        'code',
-        'qrCode',
-      ],
-    );
-    final qrPayload = extractedQrPayload.trim().isNotEmpty ? extractedQrPayload.trim() : t.id.trim();
+    final qrPayload = t.id.trim();
     if (qrPayload.isEmpty) return const SizedBox.shrink();
 
     final scheme = Theme.of(context).colorScheme;
@@ -266,7 +323,15 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(width: 100, child: Text('$label:', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey))),
+          SizedBox(
+            width: 100,
+            child: Text(
+              '$label:',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
           Expanded(child: Text(value, style: Theme.of(context).textTheme.bodyMedium)),
         ],
       ),
@@ -307,9 +372,9 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     final row = _extractField(t.raw, ['row', 'seatRow']);
     final seat = _extractField(t.raw, ['seat', 'seatNumber', 'seatNo']);
     final mappedSeatingLabel = [section, row, seat].where((x) => x.isNotEmpty).join(' · ');
+    final ticketInfoMap = _extractTicketInfoMap(t);
     final placeIdsRaw = t.raw?['placeIds'] ?? t.raw?['_clientPlaceIds'];
-    final sectionSelectionsRaw = t.raw?['sectionSelections'] ??
-        (t.raw?['ticketInfo'] is Map ? (t.raw?['ticketInfo']?['sectionSelections']) : null);
+    final sectionSelectionsRaw = t.raw?['sectionSelections'] ?? ticketInfoMap?['sectionSelections'];
     String seatingLabel = mappedSeatingLabel.isNotEmpty
         ? mappedSeatingLabel
         : _seatLabelFromPlaceIds(placeIdsRaw);
@@ -317,24 +382,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
       seatingLabel = _sectionSelectionsLabel(sectionSelectionsRaw);
     }
 
-    final extractedQrPayload = _extractField(
-      t.raw,
-      [
-        'ticketId',
-        'qrPayload',
-        'qr',
-        'ticketCode',
-        'otp',
-        'entryCode',
-        'code',
-        'qrCode',
-      ],
-    );
-    final effectiveQrPayload =
-        extractedQrPayload.trim().isNotEmpty ? extractedQrPayload.trim() : t.id.trim();
-    final ticketInfoMap = t.raw?['ticketInfo'] is Map<String, dynamic>
-        ? t.raw!['ticketInfo'] as Map<String, dynamic>
-        : (t.raw?['ticketInfo'] is Map ? Map<String, dynamic>.from(t.raw!['ticketInfo'] as Map) : null);
+    final effectiveQrPayload = t.id.trim();
     final orderQty = parseTicketOrderQuantity(t.quantity, ticketInfoMap);
     final showMasterQr = showMasterEntryQrOnClient(orderQty);
     final childQrCodes = parseChildQrCodes(ticketInfoMap);
@@ -343,9 +391,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     final showGuestQrBlock = !showMasterQr && childQrCodes.isNotEmpty;
 
     // Seat ticket breakdown (optional for seated events).
-    final seatTicketsRaw = t.raw?['ticketInfo'] is Map
-        ? (t.raw?['ticketInfo']?['seatTickets'])
-        : null;
+    final seatTicketsRaw = ticketInfoMap?['seatTickets'];
     final List<Map<String, dynamic>> seatTickets = [];
     if (seatTicketsRaw is List) {
       for (final item in seatTicketsRaw) {
@@ -369,29 +415,10 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
     final bool usedModelServiceFee = (t.serviceFee ?? '').trim().isNotEmpty;
     final bool usedModelTotalAmount = (t.totalAmount ?? '').trim().isNotEmpty;
 
-    String priceStr = usedModelBasePrice
-        ? (t.basePrice ?? '').trim()
-        : _extractField(t.raw, [
-            'basePrice',
-            'price',
-            'ticketPrice',
-            'subtotal',
-            'unitPrice',
-            'finalPrice',
-            'finalPricePerTicket',
-          ]);
-    String serviceFeeStr = usedModelServiceFee
-        ? (t.serviceFee ?? '').trim()
-        : _extractField(t.raw, ['serviceFee', 'totalServiceFee', 'service_fee', 'ticketServiceFee']);
-    String vatStr = _extractField(t.raw, [
-      'vatAmount',
-      'totalVatAmount',
-      'taxAmount',
-      'entertainmentTaxAmount',
-    ]);
-    String totalStr = usedModelTotalAmount
-        ? (t.totalAmount ?? '').trim()
-        : _extractField(t.raw, [
+    // Prefer API aggregate money fields (ticketInfo / model / raw).
+    double? apiTotalAmount = usedModelTotalAmount
+        ? _toDouble(t.totalAmount)
+        : _firstMoney(ticketInfoMap, t.raw, [
             'totalAmount',
             'total',
             'amount',
@@ -399,14 +426,75 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
             'grandTotal',
             'totalPaidAmount',
           ]);
-    bool showPricing = priceStr.isNotEmpty || serviceFeeStr.isNotEmpty || vatStr.isNotEmpty || totalStr.isNotEmpty;
+    double? apiBasePrice = usedModelBasePrice
+        ? _toDouble(t.basePrice)
+        : _firstMoney(ticketInfoMap, t.raw, [
+            'totalBasePrice',
+            'basePrice',
+            'catalogTotalBasePrice',
+            'ticketPrice',
+            'subtotal',
+            'unitPrice',
+          ]);
+    // Do not treat remapped `price` as Total; only use as base fallback if no base yet.
+    apiBasePrice ??= _firstMoney(ticketInfoMap, t.raw, ['price', 'finalPrice', 'finalPricePerTicket']);
+    double? apiCatalogBase = _firstMoney(ticketInfoMap, t.raw, ['catalogTotalBasePrice']);
+    double? apiServiceFee = usedModelServiceFee
+        ? _toDouble(t.serviceFee)
+        : _firstMoney(ticketInfoMap, t.raw, [
+            'totalServiceFee',
+            'serviceFee',
+            'service_fee',
+            'ticketServiceFee',
+          ]);
+    double? apiVatAmount = _firstMoney(ticketInfoMap, t.raw, [
+      'vatAmount',
+      'totalVatAmount',
+      'taxAmount',
+      'entertainmentTaxAmount',
+    ]);
+    double? apiVatRate = _firstMoney(ticketInfoMap, t.raw, ['vatRate']);
+    if (apiVatRate != null && (apiVatRate < 0 || apiVatRate > 100)) {
+      apiVatRate = null;
+    }
+    double? apiServiceTax = _firstMoney(ticketInfoMap, t.raw, [
+      'serviceTaxAmount',
+      'totalServiceTaxAmount',
+    ]);
+    double? apiOrderFee = _firstMoney(ticketInfoMap, t.raw, [
+      'orderFee',
+      'totalOrderFee',
+    ]);
+    double? apiOrderFeeServiceTax = _firstMoney(ticketInfoMap, t.raw, [
+      'orderFeeServiceTax',
+    ]);
+    double? apiCouponDiscount = _firstMoney(ticketInfoMap, t.raw, [
+      'couponDiscountAmount',
+      'discountAmount',
+    ]);
+    final couponCode = () {
+      final fromInfo = ticketInfoMap?['couponCode']?.toString().trim() ?? '';
+      if (fromInfo.isNotEmpty) return fromInfo;
+      return (t.raw?['couponCode']?.toString() ?? '').trim();
+    }();
 
-    // If seat tickets exist, compute price/service fee/total from their per-seat pricing.
+    double? priceNum = apiBasePrice;
+    double? serviceFeeNum = apiServiceFee;
+    double? vatNum = apiVatAmount;
+    double? serviceTaxNum = apiServiceTax;
+    double? orderFeeNum = apiOrderFee;
+    double? orderFeeServiceTaxNum = apiOrderFeeServiceTax;
+    double? discountNum = apiCouponDiscount;
+    double? totalNum = (apiTotalAmount != null && apiTotalAmount > 0) ? apiTotalAmount : null;
+    double? catalogBaseNum = apiCatalogBase;
+
+    // Seat recompute fills gaps and provides line-item transparency; never overwrite a valid API total.
     if (seatTickets.isNotEmpty) {
-      double totalBasePrice = 0;
-      double totalServiceFee = 0;
-      double totalVatAmount = 0;
-      double totalAmount = 0;
+      double seatBaseSum = 0;
+      double seatServiceFeeSum = 0;
+      double seatVatSum = 0;
+      double seatServiceTaxSum = 0;
+      double seatOrderFeeMax = 0;
       bool hasAnySeatLevelPricing = false;
 
       for (final st in seatTickets) {
@@ -414,7 +502,6 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
         if (pricingRaw is! Map) continue;
         final pricing = Map<String, dynamic>.from(pricingRaw);
 
-        // Only consider the seat for computation if it has at least base price or service fee.
         final baseMaybe = pricing['basePrice'] ?? pricing['unitPrice'];
         final serviceFeeMaybe = pricing['serviceFee'];
         if (baseMaybe == null && serviceFeeMaybe == null) continue;
@@ -422,32 +509,84 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
         hasAnySeatLevelPricing = true;
 
         final basePrice = _toDouble(pricing['basePrice'] ?? pricing['unitPrice']) ?? 0;
-        final vatAmount = _resolveVatAmount(pricing['basePrice'] ?? pricing['unitPrice'], pricing['tax'] ?? pricing['vat']) ?? 0;
+        final vatAmount =
+            _resolveVatAmount(pricing['basePrice'] ?? pricing['unitPrice'], pricing['tax'] ?? pricing['vat']) ??
+                0;
         final serviceFee = _toDouble(pricing['serviceFee']) ?? 0;
+        final serviceTax = _resolveSeatServiceTax(pricing) ?? 0;
+        final seatOrderFee = _toDouble(pricing['orderFee']) ?? 0;
 
-        totalBasePrice += basePrice;
-        totalServiceFee += serviceFee;
-        totalVatAmount += vatAmount;
-
-        totalAmount += (basePrice + vatAmount + serviceFee);
+        seatBaseSum += basePrice;
+        seatServiceFeeSum += serviceFee;
+        seatVatSum += vatAmount;
+        seatServiceTaxSum += serviceTax;
+        if (seatOrderFee > seatOrderFeeMax) {
+          seatOrderFeeMax = seatOrderFee;
+        }
       }
 
-      // If backend didn't provide per-seat pricing (pricing=null), fall back to the aggregate values.
       if (hasAnySeatLevelPricing) {
-        priceStr = totalBasePrice.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
-        serviceFeeStr = totalServiceFee.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
-        vatStr = totalVatAmount.toStringAsFixed(2).replaceFirst(RegExp(r'\.?0+$'), '');
-        totalStr = totalAmount.toStringAsFixed(2);
-        showPricing = totalAmount > 0 || showPricing;
+        priceNum ??= seatBaseSum;
+        if (serviceFeeNum == null || serviceFeeNum == 0) {
+          serviceFeeNum = seatServiceFeeSum;
+        }
+        vatNum ??= seatVatSum;
+        if (serviceTaxNum == null || serviceTaxNum == 0) {
+          serviceTaxNum = seatServiceTaxSum;
+        }
+        // Prefer aggregate ticketInfo.orderFee; otherwise take max once across seats (not a sum).
+        if (orderFeeNum == null || orderFeeNum == 0) {
+          orderFeeNum = seatOrderFeeMax > 0 ? seatOrderFeeMax : orderFeeNum;
+        }
+
+        if (totalNum == null) {
+          final seatPartsTotal = seatBaseSum +
+              seatVatSum +
+              seatServiceFeeSum +
+              seatServiceTaxSum +
+              (orderFeeNum ?? 0) +
+              (orderFeeServiceTaxNum ?? 0);
+          if (seatPartsTotal > 0) {
+            totalNum = seatPartsTotal;
+          }
+        }
       }
     }
 
-    final priceNum = _toDouble(priceStr);
-    final serviceFeeNum = _toDouble(serviceFeeStr);
-    final vatNum = _toDouble(vatStr);
-    final totalNum = _toDouble(totalStr);
-    final isFreeTicket = [priceNum, serviceFeeNum, vatNum, totalNum].every((v) => v == null || v == 0);
+    // Display base: catalog base when a coupon discount was applied.
+    final displayBaseNum = (discountNum != null && discountNum > 0 && catalogBaseNum != null && catalogBaseNum > 0)
+        ? catalogBaseNum
+        : priceNum;
+
+    final bool showPricing = [
+          displayBaseNum,
+          discountNum,
+          serviceFeeNum,
+          vatNum,
+          serviceTaxNum,
+          orderFeeNum,
+          orderFeeServiceTaxNum,
+          totalNum,
+          apiTotalAmount,
+          apiBasePrice,
+        ].any((v) => v != null) ||
+        seatTickets.isNotEmpty;
+
+    final isFreeTicket = [
+      displayBaseNum,
+      discountNum,
+      serviceFeeNum,
+      vatNum,
+      serviceTaxNum,
+      orderFeeNum,
+      orderFeeServiceTaxNum,
+      totalNum,
+    ].every((v) => v == null || v == 0);
     final isEventEnded = _isEventEnded(t);
+
+    final String vatRowLabel = apiVatRate != null
+        ? 'VAT (${apiVatRate.toStringAsFixed(apiVatRate % 1 == 0 ? 0 : 1)}%)'
+        : 'VAT';
 
     if (kDebugMode) {
       final placeIdsSample = placeIdsRaw is List && placeIdsRaw.isNotEmpty
@@ -471,7 +610,6 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
       );
       debugPrint(
         '[MyTicketDetailScreen][entry] entryCodeLen=${entryCode.length} '
-        'extractedQrPayloadLen=${extractedQrPayload.length} '
         'effectiveQrPayloadLen=${effectiveQrPayload.length}',
       );
       debugPrint(
@@ -479,8 +617,9 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
         'basePrice(model)="${t.basePrice ?? ''}" usedModelBasePrice=$usedModelBasePrice '
         'serviceFee(model)="${t.serviceFee ?? ''}" usedModelServiceFee=$usedModelServiceFee '
         'totalAmount(model)="${t.totalAmount ?? ''}" usedModelTotalAmount=$usedModelTotalAmount '
-        'priceStr="$priceStr" serviceFeeStr="$serviceFeeStr" totalStr="$totalStr" '
-        'showPricing=$showPricing '
+        'priceNum=$priceNum serviceFeeNum=$serviceFeeNum vatNum=$vatNum '
+        'serviceTaxNum=$serviceTaxNum orderFeeNum=$orderFeeNum discountNum=$discountNum '
+        'totalNum=$totalNum couponCode="$couponCode" showPricing=$showPricing '
         'rawKeys=${t.raw?.keys.toList() ?? const <String>[]}',
       );
     }
@@ -489,6 +628,7 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
       appBar: AppBar(
         title: const Text('Ticket'),
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => context.pop()),
+        actions: const [LegalOverflowMenuButton()],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
@@ -567,7 +707,11 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
                         );
                         final lineBase = _toDouble(pricing['basePrice'] ?? pricing['unitPrice']);
                         final lineServiceFee = _toDouble(pricing['serviceFee']);
-                        final lineVat = _resolveVatAmount(pricing['basePrice'] ?? pricing['unitPrice'], pricing['tax'] ?? pricing['vat']);
+                        final lineVat = _resolveVatAmount(
+                          pricing['basePrice'] ?? pricing['unitPrice'],
+                          pricing['tax'] ?? pricing['vat'],
+                        );
+                        final lineServiceTax = _resolveSeatServiceTax(pricing);
                         final lineName = (st['ticketName'] ?? '').toString().trim();
 
                         return Container(
@@ -580,35 +724,67 @@ class _MyTicketDetailScreenState extends State<MyTicketDetailScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(lineName.isNotEmpty ? lineName : 'Ticket ${index + 1}', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+                              Text(
+                                lineName.isNotEmpty ? lineName : 'Ticket ${index + 1}',
+                                style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                              ),
                               _infoRow(context, 'Price', _formatMoney(lineBase, lineCurrency)),
                               _infoRow(context, 'Service fee', _formatMoney(lineServiceFee, lineCurrency)),
                               _infoRow(context, 'VAT', _formatMoney(lineVat, lineCurrency)),
+                              if (lineServiceTax != null && lineServiceTax > 0)
+                                _infoRow(context, 'Service tax', _formatMoney(lineServiceTax, lineCurrency)),
                             ],
                           ),
                         );
                       }),
                       const SizedBox(height: 8),
                     ],
-                    _infoRow(
-                      context,
-                      'Price',
-                      priceStr.isNotEmpty ? '${priceStr}${currency.isNotEmpty ? ' $currency' : ''}' : '',
-                    ),
-                    _infoRow(
-                      context,
-                      'Service fee',
-                      serviceFeeStr.isNotEmpty ? '${serviceFeeStr}${currency.isNotEmpty ? ' $currency' : ''}' : '',
-                    ),
-                    _infoRow(
-                      context,
-                      'VAT',
-                      vatStr.isNotEmpty ? '${vatStr}${currency.isNotEmpty ? ' $currency' : ''}' : '',
-                    ),
+                    if (displayBaseNum != null && displayBaseNum > 0)
+                      _infoRow(
+                        context,
+                        'Price',
+                        _withCurrency(_moneyAmountLabel(displayBaseNum), currency),
+                      ),
+                    if (discountNum != null && discountNum > 0)
+                      _infoRow(
+                        context,
+                        couponCode.isNotEmpty ? 'Discount ($couponCode)' : 'Discount',
+                        _withCurrency(_moneyAmountLabel(discountNum), currency),
+                      ),
+                    if (serviceFeeNum != null && serviceFeeNum > 0)
+                      _infoRow(
+                        context,
+                        'Service fee',
+                        _withCurrency(_moneyAmountLabel(serviceFeeNum), currency),
+                      ),
+                    if (vatNum != null && vatNum > 0)
+                      _infoRow(
+                        context,
+                        vatRowLabel,
+                        _withCurrency(_moneyAmountLabel(vatNum), currency),
+                      ),
+                    if (serviceTaxNum != null && serviceTaxNum > 0)
+                      _infoRow(
+                        context,
+                        'Service tax',
+                        _withCurrency(_moneyAmountLabel(serviceTaxNum), currency),
+                      ),
+                    if (orderFeeNum != null && orderFeeNum > 0)
+                      _infoRow(
+                        context,
+                        'Order fee',
+                        _withCurrency(_moneyAmountLabel(orderFeeNum), currency),
+                      ),
+                    if (orderFeeServiceTaxNum != null && orderFeeServiceTaxNum > 0)
+                      _infoRow(
+                        context,
+                        'Order fee tax',
+                        _withCurrency(_moneyAmountLabel(orderFeeServiceTaxNum), currency),
+                      ),
                     _infoRow(
                       context,
                       'Total',
-                      totalStr.isNotEmpty ? '${totalStr}${currency.isNotEmpty ? ' $currency' : ''}' : '',
+                      totalNum != null ? formatFinalTotal(totalNum, currency.isNotEmpty ? currency : 'EUR') : '',
                     ),
                     ],
                   ],

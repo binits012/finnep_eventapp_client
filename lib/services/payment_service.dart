@@ -1,10 +1,10 @@
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
-
 import 'api_client.dart';
+import '../utils/checkout_payment.dart';
 import '../utils/currency.dart';
-import '../utils/ticket_pricing.dart';
+import '../utils/seat_catalog_coupon.dart';
+import '../utils/seat_pricing.dart';
 
 const _chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
@@ -13,15 +13,43 @@ String _generateNonce() {
   return r.join();
 }
 
-String _fmt(num n, [int decimals = 2]) {
-  if (decimals == 0) return n.round().toString();
-  return n.toStringAsFixed(decimals);
-}
+({double basePrice, double? catalogBaseSubtotalPreCoupon}) _metadataPricingInputs({
+  required double basePrice,
+  required int quantity,
+  required bool hasSeats,
+  double? totalAmountOverride,
+  String? couponCode,
+  double? couponDiscountAmount,
+  double? catalogBaseSubtotalPreCoupon,
+}) {
+  final gaCoupon = totalAmountOverride == null &&
+      !hasSeats &&
+      (couponCode?.trim().isNotEmpty ?? false) &&
+      couponDiscountAmount != null &&
+      couponDiscountAmount > 0;
 
-String _fmtRate(num n) {
-  // Preserve decimals (e.g. 13.5, 25.5) and trim trailing zeros.
-  final s = _fmt(n, 2);
-  return s.replaceFirst(RegExp(r'\.?0+$'), '');
+  if (!gaCoupon) {
+    return (
+      basePrice: basePrice,
+      catalogBaseSubtotalPreCoupon: catalogBaseSubtotalPreCoupon,
+    );
+  }
+
+  return (
+    basePrice: catalogUnitBaseAfterCoupon(
+      unitBasePrice: basePrice,
+      quantity: quantity,
+      couponCode: couponCode,
+      couponDiscountAmount: couponDiscountAmount,
+    ),
+    catalogBaseSubtotalPreCoupon: catalogBaseSubtotalPreCoupon ??
+        catalogBaseSubtotalBeforeCoupon(
+          unitBasePrice: basePrice,
+          quantity: quantity,
+          couponCode: couponCode,
+          couponDiscountAmount: couponDiscountAmount,
+        ),
+  );
 }
 
 Future<Map<String, dynamic>> createPaymentIntent({
@@ -40,6 +68,7 @@ Future<Map<String, dynamic>> createPaymentIntent({
   double serviceTaxRate = 0,
   double orderFee = 0,
   required double vatRate,
+  double? entertainmentTax,
   String? sessionId,
   List<String>? placeIds,
   List<Map<String, dynamic>>? sectionSelections,
@@ -47,73 +76,87 @@ Future<Map<String, dynamic>> createPaymentIntent({
   String? country,
   String? fullName,
   double? totalAmountOverride,
+  bool marketingOptIn = false,
+  String? couponCode,
+  String? couponId,
+  double? couponDiscountAmount,
+  Map<String, dynamic>? registrationAnswers,
 }) async {
-  // orderFee is per transaction (not per ticket). Keep per-ticket subtotal separate.
-  final subtotalNoVat = (basePrice + serviceFee) * quantity;
-  final vatAmount = (basePrice * quantity) * (vatRate / 100);
-  final serviceTaxMultiplier = serviceTaxRate > 0 ? (serviceTaxRate / 100) : 0.0;
-  final serviceTaxAmount = (serviceFee * quantity) * serviceTaxMultiplier;
-  final orderFeeServiceTax = orderFee * serviceTaxMultiplier;
-  final totalAmount = totalAmountOverride ??
-      (subtotalNoVat + vatAmount + serviceTaxAmount + orderFee + orderFeeServiceTax);
-  final totalBasePrice = basePrice * quantity;
-  final totalServiceFee = serviceFee * quantity;
-  final totalOrderFee = orderFee;
-  final stripeBreakdown = calculateTicketPrice(
-    price: basePrice,
-    vat: vatRate,
-    entertainmentTax: null,
-    serviceTax: serviceTaxRate,
-    serviceFee: serviceFee,
-    orderFee: 0,
+  final hasSeats = (placeIds != null && placeIds.isNotEmpty) ||
+      (seatTickets != null && seatTickets.isNotEmpty);
+
+  SeatCheckoutSummary? seatCfgTotals;
+  double? catalogBasePre;
+  final st = seatTickets;
+  if (st != null && st.isNotEmpty && seatTicketsUsePricingConfiguration(st)) {
+    seatCfgTotals = pricingConfigSeatSummaryFromSeatTickets(st);
+    final disc = couponDiscountAmount;
+    if (disc != null && disc > 0) {
+      catalogBasePre = seatTicketsCatalogSum(st);
+      if (seatCfgTotals != null) {
+        seatCfgTotals = applyCouponToSeatSummaryTotals(
+          totals: seatCfgTotals,
+          discountAmount: disc,
+        );
+      }
+    }
+  }
+
+  final pricingInputs = _metadataPricingInputs(
+    basePrice: basePrice,
+    quantity: quantity,
+    hasSeats: hasSeats,
+    totalAmountOverride: totalAmountOverride,
+    couponCode: couponCode,
+    couponDiscountAmount: couponDiscountAmount,
+    catalogBaseSubtotalPreCoupon: catalogBasePre,
   );
-  final perUnitSubtotal = stripeBreakdown.subtotalPerTicket;
-  final perUnitTotal = stripeBreakdown.finalPricePerTicket;
-  // When override is set (e.g. seatTickets), backend validates amount against its own recalculation; use 3 decimals for metadata parity with web.
-  final totalAmountDecimals = totalAmountOverride != null ? 3 : 2;
-  debugPrint('[Payment service] createPaymentIntent: basePrice=$basePrice serviceFee=$serviceFee orderFee=$orderFee qty=$quantity vatRate=$vatRate% serviceTaxRate=$serviceTaxRate');
-  debugPrint('[Payment service] subtotalNoVat=$subtotalNoVat vatAmount=$vatAmount totalAmount=$totalAmount override=$totalAmountOverride → amountCents=$amountCents (${amountCents / 100} €)');
-  final metadata = <String, dynamic>{
-    'eventId': eventId,
-    'ticketId': ticketId,
-    'email': email,
-    'quantity': quantity.toString(),
-    'eventName': eventName,
-    'ticketName': ticketName,
-    'merchantId': merchantId,
-    'externalMerchantId': externalMerchantId,
-    'nonce': _generateNonce(),
-    'basePrice': _fmt(basePrice, 0),
-    'subtotal': _fmt(subtotalNoVat, 3),
-    'serviceFee': _fmt(serviceFee, 0),
-    'totalServiceFee': _fmt(totalServiceFee),
-    'serviceTax': _fmtRate(serviceTaxRate),
-    'serviceTaxAmount': _fmt(serviceTaxAmount, 3),
-    'vatRate': _fmtRate(vatRate),
-    'vatAmount': _fmt(vatAmount, 3),
-    'orderFee': _fmt(orderFee, 0),
-    'orderFeeServiceTax': _fmt(orderFeeServiceTax, 3),
-    'totalOrderFee': _fmt(totalOrderFee, 3),
-    'totalAmount': _fmt(totalAmount, totalAmountDecimals),
-    'perUnitSubtotal': _fmt(perUnitSubtotal, 0),
-    'perUnitTotal': _fmt(perUnitTotal, 3),
-    'totalBasePrice': _fmt(totalBasePrice, 0),
-    'totalVatAmount': _fmt(vatAmount, 3),
-    'country': country ?? '',
-    'marketingOptIn': false,
-    'locale': 'en-US',
-  };
+
+  final metadata = buildPaymentMetadata(
+    eventId: eventId,
+    ticketId: ticketId,
+    email: email,
+    quantity: quantity,
+    eventName: eventName,
+    ticketName: ticketName,
+    merchantId: merchantId,
+    externalMerchantId: externalMerchantId,
+    nonce: _generateNonce(),
+    price: pricingInputs.basePrice,
+    serviceFee: serviceFee,
+    vat: vatRate,
+    entertainmentTax: entertainmentTax,
+    serviceTax: serviceTaxRate,
+    orderFee: orderFee,
+    country: country,
+    marketingOptIn: marketingOptIn,
+    totalAmountOverride: totalAmountOverride,
+    hasSeats: hasSeats,
+    couponCode: couponCode,
+    couponId: couponId,
+    couponDiscountAmount: couponDiscountAmount,
+    catalogBaseSubtotalPreCoupon: pricingInputs.catalogBaseSubtotalPreCoupon,
+    seatPricingConfigurationTotals: seatCfgTotals,
+  );
   if (sessionId != null) metadata['sessionId'] = sessionId;
   if (placeIds != null && placeIds.isNotEmpty) metadata['placeIds'] = jsonEncode(placeIds);
-  if (sectionSelections != null && sectionSelections.isNotEmpty) metadata['sectionSelections'] = jsonEncode(sectionSelections);
-  if (seatTickets != null && seatTickets.isNotEmpty) metadata['seatTickets'] = jsonEncode(seatTickets);
-  if (fullName != null && fullName.trim().isNotEmpty) metadata['fullName'] = fullName.trim();
+  if (sectionSelections != null && sectionSelections.isNotEmpty) {
+    metadata['sectionSelections'] = jsonEncode(sectionSelections);
+  }
+  if (seatTickets != null && seatTickets.isNotEmpty) {
+    metadata['seatTickets'] = jsonEncode(seatTickets);
+  }
+  if (fullName != null && fullName.trim().isNotEmpty) {
+    metadata['fullName'] = fullName.trim();
+  }
 
   final response = await apiPost('/create-payment-intent', body: {
     'amount': amountCents,
     'currency': normalizeStripeCurrencyCode(currency),
     'paymentProvider': 'stripe',
     'metadata': metadata,
+    if (registrationAnswers != null && registrationAnswers.isNotEmpty)
+      'registrationAnswers': registrationAnswers,
   });
   throwIfNotOk(response);
   final body = parseJsonBody(response);
@@ -137,6 +180,7 @@ Future<Map<String, dynamic>> createPaytrailPayment({
   double serviceTaxRate = 0,
   double orderFee = 0,
   required double vatRate,
+  double? entertainmentTax,
   String? sessionId,
   List<String>? placeIds,
   List<Map<String, dynamic>>? sectionSelections,
@@ -144,92 +188,87 @@ Future<Map<String, dynamic>> createPaytrailPayment({
   String? country,
   String? fullName,
   double? totalAmountOverride,
+  bool marketingOptIn = false,
+  String? couponCode,
+  String? couponId,
+  double? couponDiscountAmount,
+  Map<String, dynamic>? registrationAnswers,
 }) async {
-  // orderFee is per transaction (not per ticket).
-  final subtotalNoVat = (basePrice + serviceFee) * quantity;
-  final vatAmount = (basePrice * quantity) * (vatRate / 100);
-  final serviceTaxMultiplier = serviceTaxRate > 0 ? (serviceTaxRate / 100) : 0.0;
-  final serviceTaxAmount = (serviceFee * quantity) * serviceTaxMultiplier;
-  final orderFeeServiceTax = orderFee * serviceTaxMultiplier;
-
   final hasSeats = (placeIds != null && placeIds.isNotEmpty) ||
       (seatTickets != null && seatTickets.isNotEmpty);
-  final meta3 = hasSeats || totalAmountOverride != null;
 
-  // Totals (match web): base/service/order are simple sums; taxes are separate fields.
-  final totalBasePrice = basePrice * quantity;
-  final totalServiceFee = serviceFee * quantity;
-  final totalOrderFee = orderFee;
-
-  // For seats, backend/web use "entertainmentTax" naming (even when it's effectively vatRate).
-  final entertainmentTax = vatRate;
-  final entertainmentTaxAmount = (basePrice * quantity) * (entertainmentTax / 100);
-  final paytrailBreakdown = calculateTicketPrice(
-    price: basePrice,
-    vat: vatRate,
-    entertainmentTax: null,
-    serviceTax: serviceTaxRate,
-    serviceFee: serviceFee,
-    orderFee: 0,
-  );
-  final perUnitSubtotal = paytrailBreakdown.subtotalPerTicket;
-  final computedTotalAmount = (paytrailBreakdown.finalPricePerTicket * quantity) + orderFee + orderFeeServiceTax;
-  final totalAmountForMeta = totalAmountOverride ?? computedTotalAmount;
-  final totalAmountDecimalsPaytrail = meta3 ? 3 : 2;
-  final perUnitTotal = paytrailBreakdown.finalPricePerTicket;
-
-  debugPrint('[Payment service] createPaytrailPayment: basePrice=$basePrice serviceFee=$serviceFee orderFee=$orderFee qty=$quantity vatRate=$vatRate%');
-  debugPrint('[Payment service] subtotalNoVat=$subtotalNoVat vatAmount=$vatAmount totalAmount=$computedTotalAmount override=$totalAmountOverride → amountCents=$amountCents (${amountCents / 100} €)');
-  final metadata = <String, dynamic>{
-    'eventId': eventId,
-    'ticketId': ticketId,
-    'email': email,
-    'quantity': quantity.toString(),
-    'eventName': eventName,
-    'ticketName': ticketName,
-    'merchantId': merchantId,
-    'externalMerchantId': externalMerchantId,
-    'nonce': _generateNonce(),
-    'basePrice': _fmt(basePrice, 0),
-    'subtotal': _fmt(subtotalNoVat, meta3 ? 3 : 2),
-    'serviceFee': _fmt(serviceFee, 0),
-    'totalServiceFee': _fmt(totalServiceFee),
-    'serviceTax': _fmtRate(serviceTaxRate),
-    'serviceTaxAmount': _fmt(serviceTaxAmount, meta3 ? 3 : 2),
-    'vatRate': _fmtRate(vatRate),
-    'vatAmount': _fmt(vatAmount, meta3 ? 3 : 2),
-    'orderFee': _fmt(orderFee, 0),
-    'orderFeeServiceTax': _fmt(orderFeeServiceTax, meta3 ? 3 : 2),
-    'totalOrderFee': _fmt(totalOrderFee, meta3 ? 3 : 2),
-    'totalAmount': _fmt(totalAmountForMeta, totalAmountDecimalsPaytrail),
-    'perUnitSubtotal': _fmt(perUnitSubtotal, 0),
-    'perUnitTotal': _fmt(perUnitTotal, meta3 ? 3 : 2),
-    'totalBasePrice': _fmt(totalBasePrice, meta3 ? 3 : 0),
-    'totalVatAmount': _fmt(vatAmount, meta3 ? 3 : 2),
-    'country': country ?? '',
-    'marketingOptIn': false,
-    'locale': 'en-US',
-  };
-  if (meta3) {
-    // Match web payload fields for seated events
-    metadata['entertainmentTax'] = _fmtRate(entertainmentTax);
-    metadata['entertainmentTaxAmount'] = _fmt(entertainmentTaxAmount, 3);
-    metadata['totalEntertainmentTaxAmount'] = _fmt(entertainmentTaxAmount, 3);
-    metadata['serviceTax'] = _fmtRate(serviceTaxRate);
-    metadata['orderFee'] = _fmt(orderFee, 0);
+  SeatCheckoutSummary? seatCfgTotals;
+  double? catalogBasePre;
+  final stPt = seatTickets;
+  if (stPt != null && stPt.isNotEmpty && seatTicketsUsePricingConfiguration(stPt)) {
+    seatCfgTotals = pricingConfigSeatSummaryFromSeatTickets(stPt);
+    final disc = couponDiscountAmount;
+    if (disc != null && disc > 0) {
+      catalogBasePre = seatTicketsCatalogSum(stPt);
+      if (seatCfgTotals != null) {
+        seatCfgTotals = applyCouponToSeatSummaryTotals(
+          totals: seatCfgTotals,
+          discountAmount: disc,
+        );
+      }
+    }
   }
+
+  final pricingInputs = _metadataPricingInputs(
+    basePrice: basePrice,
+    quantity: quantity,
+    hasSeats: hasSeats,
+    totalAmountOverride: totalAmountOverride,
+    couponCode: couponCode,
+    couponDiscountAmount: couponDiscountAmount,
+    catalogBaseSubtotalPreCoupon: catalogBasePre,
+  );
+
+  final metadata = buildPaymentMetadata(
+    eventId: eventId,
+    ticketId: ticketId,
+    email: email,
+    quantity: quantity,
+    eventName: eventName,
+    ticketName: ticketName,
+    merchantId: merchantId,
+    externalMerchantId: externalMerchantId,
+    nonce: _generateNonce(),
+    price: pricingInputs.basePrice,
+    serviceFee: serviceFee,
+    vat: vatRate,
+    entertainmentTax: entertainmentTax ?? vatRate,
+    serviceTax: serviceTaxRate,
+    orderFee: orderFee,
+    country: country,
+    marketingOptIn: marketingOptIn,
+    totalAmountOverride: totalAmountOverride,
+    hasSeats: hasSeats,
+    couponCode: couponCode,
+    couponId: couponId,
+    couponDiscountAmount: couponDiscountAmount,
+    catalogBaseSubtotalPreCoupon: pricingInputs.catalogBaseSubtotalPreCoupon,
+    seatPricingConfigurationTotals: seatCfgTotals,
+  );
   if (sessionId != null) metadata['sessionId'] = sessionId;
   if (placeIds != null && placeIds.isNotEmpty) metadata['placeIds'] = jsonEncode(placeIds);
-  if (sectionSelections != null && sectionSelections.isNotEmpty) metadata['sectionSelections'] = jsonEncode(sectionSelections);
-  if (seatTickets != null && seatTickets.isNotEmpty) metadata['seatTickets'] = jsonEncode(seatTickets);
-  if (fullName != null && fullName.trim().isNotEmpty) metadata['fullName'] = fullName.trim();
+  if (sectionSelections != null && sectionSelections.isNotEmpty) {
+    metadata['sectionSelections'] = jsonEncode(sectionSelections);
+  }
+  if (seatTickets != null && seatTickets.isNotEmpty) {
+    metadata['seatTickets'] = jsonEncode(seatTickets);
+  }
+  if (fullName != null && fullName.trim().isNotEmpty) {
+    metadata['fullName'] = fullName.trim();
+  }
 
-  // Mobile app endpoint: uses PAYTRAIL_APP_RETURN_URL to deep-link back to the app after payment.
   final response = await apiPost('/create-paytrail-payment-app', body: {
     'amount': amountCents,
     'currency': normalizeStripeCurrencyCode(currency),
     'paymentProvider': 'paytrail',
     'metadata': metadata,
+    if (registrationAnswers != null && registrationAnswers.isNotEmpty)
+      'registrationAnswers': registrationAnswers,
   });
   throwIfNotOk(response);
   final body = parseJsonBody(response);
@@ -254,6 +293,7 @@ Future<Map<String, dynamic>> paymentSuccess({
   List<String>? placeIds,
   List<Map<String, dynamic>>? sectionSelections,
   List<Map<String, dynamic>>? seatTickets,
+  bool marketingOptIn = false,
 }) async {
   final metadata = <String, dynamic>{
     'eventId': eventId,
@@ -266,10 +306,12 @@ Future<Map<String, dynamic>> paymentSuccess({
   if (ticketName != null) metadata['ticketName'] = ticketName;
   if (externalMerchantId != null) metadata['externalMerchantId'] = externalMerchantId;
   if (sessionId != null) metadata['sessionId'] = sessionId;
-  metadata['marketingOptIn'] = false;
+  metadata['marketingOptIn'] = marketingOptIn;
   metadata['locale'] = 'en-US';
   if (placeIds != null && placeIds.isNotEmpty) metadata['placeIds'] = placeIds;
-  if (sectionSelections != null && sectionSelections.isNotEmpty) metadata['sectionSelections'] = sectionSelections;
+  if (sectionSelections != null && sectionSelections.isNotEmpty) {
+    metadata['sectionSelections'] = sectionSelections;
+  }
   if (seatTickets != null && seatTickets.isNotEmpty) metadata['seatTickets'] = seatTickets;
 
   final response = await apiPost('/payment-success', body: {

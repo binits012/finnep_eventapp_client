@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Flutter (EU)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "debug",
+      "args": [
+        "--flavor",
+        "eu",
+        "--dart-define=ENV_FILE=.env.eu"
+      ]
+    },
+    {
+      "name": "Flutter (AU)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "debug",
+      "args": [
+        "--flavor",
+        "au",
+        "--dart-define=ENV_FILE=.env.au"
+      ]
+    }
+  ]
+}

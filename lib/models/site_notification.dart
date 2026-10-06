@@ -16,8 +16,7 @@ class SiteNotification {
     final type = json['notificationType'];
     String? typeName;
     if (type is Map) {
-      final n = type['name'];
-      typeName = n == null ? null : n.toString();
+      typeName = type['name']?.toString();
     }
     final raw = json['notification'];
     return SiteNotification(

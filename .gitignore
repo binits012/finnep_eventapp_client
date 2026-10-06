@@ -23,6 +23,13 @@ migrate_working_dir/
 # is commented out by default.
 #.vscode/
 
+# Local env (never commit secrets; copy from .env.example for CI/release builds)
+.env
+.env.eu
+.env.au
+ios/.xcode.env
+ios/Flutter/DartDefines-*.xcconfig
+
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id

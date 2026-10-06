@@ -1,0 +1,5 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug-eu.xcconfig"
+#include "Debug.xcconfig"
+#include "DartDefines-eu.xcconfig"
+PRODUCT_BUNDLE_IDENTIFIER = $(EU_BUNDLE_ID).debug
+INFOPLIST_KEY_CFBundleDisplayName = $(EU_DISPLAY_NAME)

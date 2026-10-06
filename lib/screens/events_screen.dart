@@ -4,8 +4,11 @@ import 'package:intl/intl.dart';
 
 import '../models/event.dart';
 import '../services/event_service.dart';
+import '../navigation/adaptive_navigation.dart';
 import '../theme_scope.dart';
+import '../widgets/legal_overflow_menu_button.dart';
 import '../utils/currency.dart';
+import '../utils/event_listing_pricing.dart';
 
 class EventsScreen extends StatefulWidget {
   const EventsScreen({super.key});
@@ -14,11 +17,7 @@ class EventsScreen extends StatefulWidget {
   State<EventsScreen> createState() => _EventsScreenState();
 }
 
-enum _EventsScope {
-  today,
-  tomorrow,
-  all,
-}
+enum _EventsScope { today, tomorrow, all }
 
 class _EventsScreenState extends State<EventsScreen> {
   List<Event> _events = [];
@@ -32,40 +31,103 @@ class _EventsScreenState extends State<EventsScreen> {
   }
 
   String _eventPriceLabel(Event e) {
+    if (e.isListingOnWaitlist) return 'Waitlist';
     if (_eventIsFree(e)) return 'Free';
     if (e.ticketInfo.isEmpty) return '';
-    final minPrice = e.ticketInfo.map((t) => t.price).reduce((a, b) => a < b ? a : b);
+    final minPrice = eventListingMinPayable(e);
+    if (minPrice == null) return '';
     final currency = currencyFromCountry(e.country);
     return 'From ${formatPrice(minPrice, currency)}';
   }
 
-  Widget _priceChip(BuildContext context, Event event, {double fontSize = 12}) {
-    if (event.hasSeatSelection) return const SizedBox.shrink();
+  Widget _priceChip(
+    BuildContext context,
+    Event event, {
+    double fontSize = 12,
+    bool showFootnote = true,
+  }) {
+    // Web events listing: hides price/free label for strict external —
+    // no replacement chip (matches empty `<span />` in TS).
+    if (event.isExternalEvent) return const SizedBox.shrink();
+    if (event.hasSeatSelection && !event.isListingOnWaitlist) {
+      return const SizedBox.shrink();
+    }
     final label = _eventPriceLabel(event);
     if (label.isEmpty) return const SizedBox.shrink();
-    final isFree = _eventIsFree(event);
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: fontSize > 11 ? 8 : 6, vertical: fontSize > 11 ? 4 : 2),
-      decoration: BoxDecoration(
-        color: isFree ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.secondaryContainer,
-        borderRadius: BorderRadius.circular(fontSize > 11 ? 8 : 6),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: fontSize,
-          fontWeight: FontWeight.w600,
-          color: isFree ? Theme.of(context).colorScheme.onPrimaryContainer : Theme.of(context).colorScheme.onSecondaryContainer,
+    final onWaitlist = event.isListingOnWaitlist;
+    final isFree = !onWaitlist && _eventIsFree(event);
+    final includedFeesFootnote = isFree || onWaitlist || !showFootnote
+        ? null
+        : eventListingIncludedFeesFootnote(event);
+
+    if (includedFeesFootnote == null) {
+      return Container(
+        padding: EdgeInsets.symmetric(
+          horizontal: fontSize > 11 ? 8 : 6,
+          vertical: fontSize > 11 ? 4 : 2,
         ),
-      ),
+        decoration: BoxDecoration(
+          color: isFree
+              ? Theme.of(context).colorScheme.primaryContainer
+              : Theme.of(context).colorScheme.secondaryContainer,
+          borderRadius: BorderRadius.circular(fontSize > 11 ? 8 : 6),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: fontSize,
+            fontWeight: FontWeight.w600,
+            color: isFree
+                ? Theme.of(context).colorScheme.onPrimaryContainer
+                : Theme.of(context).colorScheme.onSecondaryContainer,
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: EdgeInsets.symmetric(
+            horizontal: fontSize > 11 ? 8 : 6,
+            vertical: fontSize > 11 ? 4 : 2,
+          ),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(fontSize > 11 ? 8 : 6),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: fontSize,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.onSecondaryContainer,
+            ),
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          includedFeesFootnote,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(
+              context,
+            ).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+          ),
+        ),
+      ],
     );
   }
 
   DateTime _localDayStart(DateTime dt) => DateTime(dt.year, dt.month, dt.day);
 
-  DateTime? _eventDateLocalOrNull(Event e) => DateTime.tryParse(e.eventDate)?.toLocal();
-  DateTime? _eventEndDateLocalOrNull(Event e) =>
-      e.eventEndDate == null ? null : DateTime.tryParse(e.eventEndDate!)?.toLocal();
+  DateTime? _eventDateLocalOrNull(Event e) =>
+      DateTime.tryParse(e.eventDate)?.toLocal();
+  DateTime? _eventEndDateLocalOrNull(Event e) => e.eventEndDate == null
+      ? null
+      : DateTime.tryParse(e.eventEndDate!)?.toLocal();
 
   bool _isEventActiveNow(Event e, DateTime nowLocal) {
     final start = _eventDateLocalOrNull(e);
@@ -100,7 +162,8 @@ class _EventsScreenState extends State<EventsScreen> {
 
       if (!dtLocal.isBefore(todayStart) && dtLocal.isBefore(tomorrowStart)) {
         today.add(e);
-      } else if (!dtLocal.isBefore(tomorrowStart) && dtLocal.isBefore(dayAfterTomorrowStart)) {
+      } else if (!dtLocal.isBefore(tomorrowStart) &&
+          dtLocal.isBefore(dayAfterTomorrowStart)) {
         tomorrow.add(e);
       } else {
         later.add(e);
@@ -156,12 +219,18 @@ class _EventsScreenState extends State<EventsScreen> {
 
   Widget _buildEventCard(Event e, {bool isHorizontal = false, double? width}) {
     final date = DateTime.tryParse(e.eventDate);
-    final dateStr = date != null ? DateFormat.yMMMd().add_Hm().format(date.toLocal()) : e.eventDate;
+    final dateStr = date != null
+        ? DateFormat.yMMMd().add_Hm().format(date.toLocal())
+        : e.eventDate;
     final venueName = e.venue?.name ?? e.venueInfo?.name;
-    final secondary = Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7);
+    final secondary = Theme.of(
+      context,
+    ).colorScheme.onSurface.withValues(alpha: 0.7);
 
     final card = Card(
-      margin: isHorizontal ? EdgeInsets.zero : const EdgeInsets.only(bottom: 12),
+      margin: isHorizontal
+          ? EdgeInsets.zero
+          : const EdgeInsets.only(bottom: 12),
       child: InkWell(
         onTap: () => context.push('/events/${e.id}'),
         borderRadius: BorderRadius.circular(12),
@@ -170,38 +239,53 @@ class _EventsScreenState extends State<EventsScreen> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (e.eventPromotionPhoto != null && e.eventPromotionPhoto!.isNotEmpty)
+              if (e.eventPromotionPhoto != null &&
+                  e.eventPromotionPhoto!.isNotEmpty)
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
                   child: Image.network(
                     e.eventPromotionPhoto!,
-                    width: 80,
-                    height: 80,
+                    width: isHorizontal ? 72 : 80,
+                    height: isHorizontal ? 72 : 80,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox(width: 80, height: 80, child: Icon(Icons.image_not_supported)),
+                    errorBuilder: (_, __, ___) => SizedBox(
+                      width: isHorizontal ? 72 : 80,
+                      height: isHorizontal ? 72 : 80,
+                      child: const Icon(Icons.image_not_supported),
+                    ),
                   ),
                 )
               else
-                const SizedBox(width: 80, height: 80, child: Icon(Icons.event)),
+                SizedBox(
+                  width: isHorizontal ? 72 : 80,
+                  height: isHorizontal ? 72 : 80,
+                  child: const Icon(Icons.event),
+                ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            e.eventTitle,
-                            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
-                            maxLines: isHorizontal ? 2 : 3,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        _priceChip(context, e, fontSize: isHorizontal ? 10 : 12),
-                      ],
+                    Text(
+                      e.eventTitle,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: isHorizontal ? 15 : 16,
+                      ),
+                      maxLines: isHorizontal ? 2 : 3,
+                      overflow: TextOverflow.ellipsis,
                     ),
+                    if (_eventPriceLabel(e).isNotEmpty &&
+                        !e.isExternalEvent &&
+                        (!e.hasSeatSelection || e.isListingOnWaitlist)) ...[
+                      const SizedBox(height: 6),
+                      _priceChip(
+                        context,
+                        e,
+                        fontSize: isHorizontal ? 10 : 12,
+                        showFootnote: !isHorizontal,
+                      ),
+                    ],
                     const SizedBox(height: 4),
                     Row(
                       children: [
@@ -217,7 +301,7 @@ class _EventsScreenState extends State<EventsScreen> {
                         ),
                       ],
                     ),
-                    if (venueName != null && venueName.isNotEmpty) ...[
+                    if (!isHorizontal && venueName != null && venueName.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Row(
                         children: [
@@ -234,23 +318,30 @@ class _EventsScreenState extends State<EventsScreen> {
                         ],
                       ),
                     ],
-                    if (e.eventLocationAddress != null && e.eventLocationAddress!.isNotEmpty) ...[
+                    if (!isHorizontal &&
+                        e.eventLocationAddress != null &&
+                        e.eventLocationAddress!.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text(
                         e.eventLocationAddress!,
                         style: TextStyle(color: secondary, fontSize: 11),
-                        maxLines: isHorizontal ? 1 : 2,
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ],
-                    if (e.city != null && e.city!.isNotEmpty) ...[
+                    if (!isHorizontal && e.city != null && e.city!.isNotEmpty) ...[
                       const SizedBox(height: 2),
-                      Text(e.city!, style: TextStyle(color: secondary, fontSize: 12)),
+                      Text(
+                        e.city!,
+                        style: TextStyle(color: secondary, fontSize: 12),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ],
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right),
+              if (!isHorizontal) const Icon(Icons.chevron_right),
             ],
           ),
         ),
@@ -275,7 +366,12 @@ class _EventsScreenState extends State<EventsScreen> {
         verticalEvents = buckets.tomorrow;
         break;
       case _EventsScope.all:
-        verticalEvents = [...buckets.today, ...buckets.tomorrow, ...buckets.later, ...buckets.undated];
+        verticalEvents = [
+          ...buckets.today,
+          ...buckets.tomorrow,
+          ...buckets.later,
+          ...buckets.undated,
+        ];
         break;
     }
 
@@ -284,113 +380,124 @@ class _EventsScreenState extends State<EventsScreen> {
         title: const Text('Events'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/'),
+          onPressed: () => popOrGoHome(context),
         ),
         actions: [
           IconButton(
-            icon: Icon(ThemeScope.of(context).themeMode == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode),
+            visualDensity: VisualDensity.compact,
+            icon: Icon(
+              ThemeScope.of(context).themeMode == ThemeMode.dark
+                  ? Icons.light_mode
+                  : Icons.dark_mode,
+            ),
             onPressed: ThemeScope.of(context).toggleTheme,
           ),
+          const LegalOverflowMenuButton(),
         ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(_error!, textAlign: TextAlign.center),
-                      const SizedBox(height: 16),
-                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
-                    ],
-                  ),
-                )
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: CustomScrollView(
-                    key: const PageStorageKey('events_scroll'),
-                    slivers: [
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(_error!, textAlign: TextAlign.center),
+                  const SizedBox(height: 16),
+                  ElevatedButton(onPressed: _load, child: const Text('Retry')),
+                ],
+              ),
+            )
+          : RefreshIndicator(
+              onRefresh: _load,
+              child: CustomScrollView(
+                key: const PageStorageKey('events_scroll'),
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (nextUpEvents.isNotEmpty) ...[
+                            Text(
+                              'Next up',
+                              style: Theme.of(context).textTheme.titleMedium
+                                  ?.copyWith(fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              height: 156,
+                              child: ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: nextUpEvents.length,
+                                separatorBuilder: (_, __) =>
+                                    const SizedBox(width: 12),
+                                itemBuilder: (context, i) {
+                                  final e = nextUpEvents[i];
+                                  return _buildEventCard(
+                                    e,
+                                    isHorizontal: true,
+                                    width: 280,
+                                  );
+                                },
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                          ],
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
                             children: [
-                              if (nextUpEvents.isNotEmpty) ...[
-                                Text(
-                                  'Next up',
-                                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                                ),
-                                const SizedBox(height: 12),
-                                SizedBox(
-                                  height: 170,
-                                  child: ListView.separated(
-                                    scrollDirection: Axis.horizontal,
-                                    itemCount: nextUpEvents.length,
-                                    separatorBuilder: (_, __) => const SizedBox(width: 12),
-                                    itemBuilder: (context, i) {
-                                      final e = nextUpEvents[i];
-                                      return _buildEventCard(e, isHorizontal: true, width: 290);
-                                    },
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                              ],
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
-                                children: [
-                                  ChoiceChip(
-                                    label: const Text('Today'),
-                                    selected: _scope == _EventsScope.today,
-                                    onSelected: (selected) {
-                                      if (!selected) return;
-                                      setState(() => _scope = _EventsScope.today);
-                                    },
-                                  ),
-                                  ChoiceChip(
-                                    label: const Text('Tomorrow'),
-                                    selected: _scope == _EventsScope.tomorrow,
-                                    onSelected: (selected) {
-                                      if (!selected) return;
-                                      setState(() => _scope = _EventsScope.tomorrow);
-                                    },
-                                  ),
-                                  ChoiceChip(
-                                    label: const Text('All'),
-                                    selected: _scope == _EventsScope.all,
-                                    onSelected: (selected) {
-                                      if (!selected) return;
-                                      setState(() => _scope = _EventsScope.all);
-                                    },
-                                  ),
-                                ],
+                              ChoiceChip(
+                                label: const Text('Today'),
+                                selected: _scope == _EventsScope.today,
+                                onSelected: (selected) {
+                                  if (!selected) return;
+                                  setState(() => _scope = _EventsScope.today);
+                                },
+                              ),
+                              ChoiceChip(
+                                label: const Text('Tomorrow'),
+                                selected: _scope == _EventsScope.tomorrow,
+                                onSelected: (selected) {
+                                  if (!selected) return;
+                                  setState(
+                                    () => _scope = _EventsScope.tomorrow,
+                                  );
+                                },
+                              ),
+                              ChoiceChip(
+                                label: const Text('All'),
+                                selected: _scope == _EventsScope.all,
+                                onSelected: (selected) {
+                                  if (!selected) return;
+                                  setState(() => _scope = _EventsScope.all);
+                                },
                               ),
                             ],
                           ),
-                        ),
+                        ],
                       ),
-                      if (verticalEvents.isEmpty)
-                        const SliverFillRemaining(
-                          child: Center(child: Text('No events found')),
-                        )
-                      else
-                        SliverPadding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          sliver: SliverList(
-                            delegate: SliverChildBuilderDelegate(
-                              (context, i) {
-                                final e = verticalEvents[i];
-                                return _buildEventCard(e);
-                              },
-                              childCount: verticalEvents.length,
-                            ),
-                          ),
-                        ),
-                    ],
+                    ),
                   ),
-                ),
+                  if (verticalEvents.isEmpty)
+                    const SliverFillRemaining(
+                      child: Center(child: Text('No events found')),
+                    )
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      sliver: SliverList(
+                        delegate: SliverChildBuilderDelegate((context, i) {
+                          final e = verticalEvents[i];
+                          return _buildEventCard(e);
+                        }, childCount: verticalEvents.length),
+                      ),
+                    ),
+                ],
+              ),
+            ),
     );
   }
 }

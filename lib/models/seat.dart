@@ -10,18 +10,20 @@ class SeatModel {
   final String? seat;
   final String? section;
   final double? price;
+
   /// When from tier: base before tax (e.g. 27.0). Null when from zone.
   final double? basePrice;
+
   /// When from tier: tax amount (e.g. 3.645). Null when from zone.
   final double? taxAmount;
   final double? taxPercentage;
+
   /// When from tier: service fee amount (fee + fee*tax). Null when from zone or zero.
   final double? serviceFeeAmount;
   final double? serviceFeePercentage;
   final double? orderFeeAmount;
   final SeatStatus status;
   final List<String> tags;
-
 
   SeatModel({
     required this.placeId,
@@ -36,7 +38,7 @@ class SeatModel {
     this.taxPercentage,
     this.serviceFeeAmount,
     this.serviceFeePercentage,
-    this.orderFeeAmount, 
+    this.orderFeeAmount,
     required this.status,
     this.tags = const [],
   });
@@ -46,6 +48,7 @@ class SeatMapData {
   final List<String> placeIds;
   final List<String> sold;
   final List<String> reserved;
+  final List<String> ownReserved;
   final List<SectionModel> sections;
   final List<AreaSectionModel> areaSections;
   final dynamic backgroundSvg;
@@ -57,6 +60,7 @@ class SeatMapData {
     required this.placeIds,
     required this.sold,
     required this.reserved,
+    this.ownReserved = const [],
     required this.sections,
     this.areaSections = const [],
     this.backgroundSvg,
@@ -69,6 +73,8 @@ class SeatMapData {
     final placeIds = (json['placeIds'] as List<dynamic>?)?.cast<String>() ?? [];
     final sold = (json['sold'] as List<dynamic>?)?.cast<String>() ?? [];
     final reserved = (json['reserved'] as List<dynamic>?)?.cast<String>() ?? [];
+    final ownReserved =
+        (json['ownReserved'] as List<dynamic>?)?.cast<String>() ?? [];
     final sectionsList = json['sections'] as List<dynamic>? ?? [];
     final sections = sectionsList
         .map((e) => SectionModel.fromJson(e as Map<String, dynamic>))
@@ -77,20 +83,25 @@ class SeatMapData {
     final areaSections = areaSectionsList
         .map((e) => AreaSectionModel.fromJson(e as Map<String, dynamic>))
         .toList();
-    final sectionsWithAreaMeta =
-        SeatMapData._mergeSectionPolygonsWithAreaMeta(sections, areaSections);
+    final sectionsWithAreaMeta = SeatMapData._mergeSectionPolygonsWithAreaMeta(
+      sections,
+      areaSections,
+    );
     final zonesList = json['pricingZones'] as List<dynamic>? ?? [];
     final pricingZones = zonesList
         .map((e) => PricingZone.fromJson(e as Map<String, dynamic>))
         .toList();
     PricingConfig? pricingConfig;
     if (json['pricingConfig'] != null) {
-      pricingConfig = PricingConfig.fromJson(json['pricingConfig'] as Map<String, dynamic>);
+      pricingConfig = PricingConfig.fromJson(
+        json['pricingConfig'] as Map<String, dynamic>,
+      );
     }
     return SeatMapData(
       placeIds: placeIds,
       sold: sold,
       reserved: reserved,
+      ownReserved: ownReserved,
       sections: sectionsWithAreaMeta,
       areaSections: areaSections,
       backgroundSvg: json['backgroundSvg'],
@@ -129,6 +140,7 @@ class AreaSectionModel {
   final String sectionType;
   final String selectionMode;
   final int capacity;
+
   /// When present and 0 with [selectionMode] == area, section is not sold (map polygon only).
   final int? declaredCapacity;
   final int soldCount;
@@ -222,9 +234,9 @@ class SectionPoint {
   SectionPoint({required this.x, required this.y});
 
   factory SectionPoint.fromJson(Map<String, dynamic> json) => SectionPoint(
-        x: (json['x'] as num?)?.toDouble() ?? 0,
-        y: (json['y'] as num?)?.toDouble() ?? 0,
-      );
+    x: (json['x'] as num?)?.toDouble() ?? 0,
+    y: (json['y'] as num?)?.toDouble() ?? 0,
+  );
 }
 
 class SectionSpacingConfig {
@@ -244,8 +256,7 @@ class SectionSpacingConfig {
       SectionSpacingConfig(
         seatSpacingVisual:
             (json['seatSpacingVisual'] as num?)?.toDouble() ?? 1.0,
-        rowSpacingVisual:
-            (json['rowSpacingVisual'] as num?)?.toDouble() ?? 1.0,
+        rowSpacingVisual: (json['rowSpacingVisual'] as num?)?.toDouble() ?? 1.0,
         topMargin: (json['topMargin'] as num?)?.toDouble() ?? 0,
         rotationAngle: (json['rotationAngle'] as num?)?.toDouble() ?? 0,
       );
@@ -257,14 +268,19 @@ class PricingZone {
   final double price;
   final String? section;
 
-  PricingZone({required this.start, required this.end, required this.price, this.section});
+  PricingZone({
+    required this.start,
+    required this.end,
+    required this.price,
+    this.section,
+  });
 
   factory PricingZone.fromJson(Map<String, dynamic> json) => PricingZone(
-        start: json['start'] as int? ?? 0,
-        end: json['end'] as int? ?? 0,
-        price: ((json['price'] as num?)?.toDouble() ?? 0) / 100,
-        section: json['section'] as String?,
-      );
+    start: json['start'] as int? ?? 0,
+    end: json['end'] as int? ?? 0,
+    price: ((json['price'] as num?)?.toDouble() ?? 0) / 100,
+    section: json['section'] as String?,
+  );
 }
 
 class PricingConfig {
@@ -272,12 +288,18 @@ class PricingConfig {
   final double orderFee;
   final List<PricingTier> tiers;
 
-  PricingConfig({required this.currency, this.orderFee = 0, this.tiers = const []});
+  PricingConfig({
+    required this.currency,
+    this.orderFee = 0,
+    this.tiers = const [],
+  });
 
   factory PricingConfig.fromJson(Map<String, dynamic> json) {
     final tiersList = json['tiers'] as List<dynamic>? ?? [];
     return PricingConfig(
-      currency: normalizeStripeCurrencyCode((json['currency'] as String?) ?? 'eur'),
+      currency: normalizeStripeCurrencyCode(
+        (json['currency'] as String?) ?? 'eur',
+      ),
       orderFee: (json['orderFee'] as num?)?.toDouble() ?? 0,
       tiers: tiersList
           .map((e) => PricingTier.fromJson(e as Map<String, dynamic>))
@@ -302,10 +324,10 @@ class PricingTier {
   });
 
   factory PricingTier.fromJson(Map<String, dynamic> json) => PricingTier(
-        id: json['id'] as String? ?? '',
-        basePrice: (json['basePrice'] as num?)?.toDouble() ?? 0,
-        tax: (json['tax'] as num?)?.toDouble() ?? 0,
-        serviceFee: (json['serviceFee'] as num?)?.toDouble() ?? 0,
-        serviceTax: (json['serviceTax'] as num?)?.toDouble() ?? 0,
-      );
+    id: json['id'] as String? ?? '',
+    basePrice: (json['basePrice'] as num?)?.toDouble() ?? 0,
+    tax: (json['tax'] as num?)?.toDouble() ?? 0,
+    serviceFee: (json['serviceFee'] as num?)?.toDouble() ?? 0,
+    serviceTax: (json['serviceTax'] as num?)?.toDouble() ?? 0,
+  );
 }

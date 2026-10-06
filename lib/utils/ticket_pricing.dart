@@ -1,3 +1,8 @@
+import 'base_price_tax.dart';
+import 'money.dart';
+
+export 'money.dart' show TicketLinePricing, computeTicketLinePricing;
+
 class TicketPriceBreakdown {
   final double vatRate;
   final double serviceTaxRate;
@@ -32,37 +37,27 @@ TicketPriceBreakdown calculateTicketPrice({
   double? serviceFee,
   double? orderFee,
 }) {
-  // Match backend/web precedence: use entertainmentTax only when > 0, otherwise use VAT.
-  final entertainmentRate = entertainmentTax ?? 0;
-  final vatRate = entertainmentRate > 0 ? entertainmentRate : (vat ?? 0);
+  final vatRate = basePriceTaxPercent(vat, entertainmentTax);
   final serviceTaxRate = serviceTax ?? 0;
-  final serviceFeeAmount = serviceFee ?? 0;
-  final orderFeeAmount = orderFee ?? 0;
-
-  final vatMultiplier = vatRate > 0 ? (vatRate / 100) : 0.0;
-  final vatAmountPerTicket = price * vatMultiplier;
-  final subtotalPerTicket = price + vatAmountPerTicket;
-  final serviceTaxMultiplier = serviceTaxRate > 0 ? (serviceTaxRate / 100) : 0.0;
-  final serviceFeeTaxAmount = serviceFeeAmount * serviceTaxMultiplier;
-  final orderFeeTaxAmount = orderFeeAmount * serviceTaxMultiplier;
-  final totalPerTicket = subtotalPerTicket +
-      serviceFeeAmount +
-      serviceFeeTaxAmount;
-  final finalPricePerTicket = totalPerTicket +
-      orderFeeAmount +
-      orderFeeTaxAmount;
+  final line = computeTicketLinePricing(
+    basePrice: price,
+    serviceFee: serviceFee ?? 0,
+    vatRatePercent: vatRate,
+    serviceTaxRatePercent: serviceTaxRate,
+    orderFee: orderFee ?? 0,
+    quantity: 1,
+  );
 
   return TicketPriceBreakdown(
     vatRate: vatRate,
     serviceTaxRate: serviceTaxRate,
-    serviceFeeAmount: serviceFeeAmount,
-    orderFeeAmount: orderFeeAmount,
-    vatAmountPerTicket: vatAmountPerTicket,
-    serviceFeeTaxAmount: serviceFeeTaxAmount,
-    orderFeeTaxAmount: orderFeeTaxAmount,
-    subtotalPerTicket: subtotalPerTicket,
-    totalPerTicket: totalPerTicket,
-    finalPricePerTicket: finalPricePerTicket,
+    serviceFeeAmount: line.serviceFee,
+    orderFeeAmount: line.orderFee,
+    vatAmountPerTicket: line.perUnitVat,
+    serviceFeeTaxAmount: line.perUnitServiceTax,
+    orderFeeTaxAmount: line.orderFeeServiceTax,
+    subtotalPerTicket: line.perUnitSubtotal,
+    totalPerTicket: moneyAdd([line.perUnitSubtotal, line.perUnitVat, line.perUnitServiceTax]),
+    finalPricePerTicket: line.total,
   );
 }
-

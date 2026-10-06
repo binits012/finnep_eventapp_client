@@ -1,0 +1,13 @@
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=upload
+storeFile=/Users/YOUR_USERNAME/keystores/okazzo-client-upload.jks
+# Copy to key.properties (same folder) and fill in. Never commit key.properties or keystores.
+# Create an upload keystore: https://docs.flutter.dev/deployment/android#sign-the-app
+#
+# storeFile is resolved relative to android/app unless you use an absolute path.
+
+storePassword=
+keyPassword=
+keyAlias=
+storeFile=../upload-keystore.jks

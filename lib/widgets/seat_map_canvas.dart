@@ -5,6 +5,39 @@ import '../models/seat.dart';
 /// Padding around seat bounds in data coordinate units (matches web SVG viewBox padding).
 const double _kPadding = 20;
 
+/// Pinch zoom, relative to the fitted overview, where the section curtain is gone.
+const double _kCurtainFadeEnd = 1.7;
+
+const List<Color> _kCurtainColors = <Color>[
+  Color(0xFF1d4ed8),
+  Color(0xFF15803d),
+  Color(0xFF2563eb),
+  Color(0xFF166534),
+  Color(0xFF1e40af),
+  Color(0xFF047857),
+  Color(0xFF0284c7),
+  Color(0xFF059669),
+];
+
+/// 1 covers the section. 0 shows the seats. [relativeZoom] is 1 at the fitted overview.
+double curtainOpacityForZoom({
+  required double relativeZoom,
+  required bool sectionOpen,
+}) {
+  if (sectionOpen || relativeZoom >= _kCurtainFadeEnd) return 0;
+  if (relativeZoom <= 1) return 1;
+  return 1 - (relativeZoom - 1) / (_kCurtainFadeEnd - 1);
+}
+
+/// X/Y scale of a map transform. [Matrix4.getMaxScaleOnAxis] also reads the Z
+/// axis, which stays 1, so a fitted overview below 1 would look fully zoomed in.
+double viewScaleOf(Matrix4 matrix) {
+  final List<double> storage = matrix.storage;
+  final double scaleX = math.sqrt((storage[0] * storage[0]) + (storage[1] * storage[1]));
+  final double scaleY = math.sqrt((storage[4] * storage[4]) + (storage[5] * storage[5]));
+  return math.max(scaleX, scaleY);
+}
+
 /// Canvas-based seat map matching web SVG approach: content size = data bounding
 /// box + padding (in data units); InteractiveViewer scales to viewport.
 /// seatRadius is computed from actual seat spacing so proportions match the web.
@@ -19,6 +52,8 @@ class SeatMapCanvas extends StatefulWidget {
     this.rowSpacingMultiplier = 1.0,
     this.seatSpacingMultiplier = 1.0,
     this.seatRadiusOverride,
+    this.focusedSectionId,
+    this.onSectionTap,
   });
 
   final List<SeatModel> seats;
@@ -29,6 +64,8 @@ class SeatMapCanvas extends StatefulWidget {
   final double rowSpacingMultiplier;
   final double seatSpacingMultiplier;
   final double? seatRadiusOverride;
+  final String? focusedSectionId;
+  final ValueChanged<String>? onSectionTap;
 
   @override
   State<SeatMapCanvas> createState() => _SeatMapCanvasState();
@@ -43,7 +80,14 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
   Map<String, Offset> _seatPositions = const {};
   Map<String, List<Offset>> _transformedSectionPolygons = const {};
   bool _initialFitApplied = false;
+  double? _overviewScale;
   final TransformationController _ctrl = TransformationController();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(SeatMapCanvas oldWidget) {
@@ -52,7 +96,8 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
         oldWidget.sections != widget.sections ||
         oldWidget.rowSpacingMultiplier != widget.rowSpacingMultiplier ||
         oldWidget.seatSpacingMultiplier != widget.seatSpacingMultiplier ||
-        oldWidget.seatRadiusOverride != widget.seatRadiusOverride) {
+        oldWidget.seatRadiusOverride != widget.seatRadiusOverride ||
+        oldWidget.focusedSectionId != widget.focusedSectionId) {
       _initialFitApplied = false;
       _computeBounds();
     }
@@ -117,7 +162,7 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
     final rangeX = (maxX - minX).clamp(1.0, double.infinity);
     final rangeY = (maxY - minY).clamp(1.0, double.infinity);
 
-    final sx = widget.seatSpacingMultiplier.clamp(0.1, 3.0);
+    final sx = widget.seatSpacingMultiplier.clamp(0.1, 1.0);
     final radius = widget.seatRadiusOverride != null
         ? widget.seatRadiusOverride!.clamp(1.0, 24.0)
         : _computeSeatRadius(rangeX, rangeY) * sx;
@@ -178,16 +223,16 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
 
   double _resolveSeatScale(SectionModel? section) {
     final global = widget.seatSpacingMultiplier;
-    if ((global - 1.0).abs() > 0.001) return global.clamp(0.1, 3.0);
+    if ((global - 1.0).abs() > 0.001) return global.clamp(0.1, 1.0);
     final sectionScale = section?.spacingConfig?.seatSpacingVisual ?? 1.0;
-    return sectionScale.clamp(0.1, 3.0);
+    return sectionScale.clamp(0.1, 1.0);
   }
 
   double _resolveRowScale(SectionModel? section) {
     final global = widget.rowSpacingMultiplier;
-    if ((global - 1.0).abs() > 0.001) return global.clamp(0.1, 3.0);
+    if ((global - 1.0).abs() > 0.001) return global.clamp(0.1, 1.0);
     final sectionScale = section?.spacingConfig?.rowSpacingVisual ?? 1.0;
-    return sectionScale.clamp(0.1, 3.0);
+    return sectionScale.clamp(0.1, 1.0);
   }
 
   Offset _scaledPointForSection(SectionModel section, SectionPoint p) {
@@ -251,8 +296,8 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
     final y = seat.y ?? 0;
     if (!useSectionTransforms) {
       return Offset(
-        x * widget.seatSpacingMultiplier.clamp(0.1, 3.0),
-        y * widget.rowSpacingMultiplier.clamp(0.1, 3.0),
+        x * widget.seatSpacingMultiplier.clamp(0.1, 1.0),
+        y * widget.rowSpacingMultiplier.clamp(0.1, 1.0),
       );
     }
 
@@ -371,6 +416,26 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
     return best;
   }
 
+  String? _hitSection(Offset local) {
+    String? bestId;
+    var bestArea = double.infinity;
+    for (final section in widget.sections) {
+      if (!_sectionCanOpen(section)) continue;
+      final polygon = _transformedSectionPolygons[section.id];
+      if (polygon == null || polygon.length < 3) continue;
+      final canvasPoints = <Offset>[
+        for (final point in polygon) Offset(_pointTx(point.dx), _pointTy(point.dy)),
+      ];
+      if (!_polygonContains(local, canvasPoints)) continue;
+      final area = _polygonArea(canvasPoints);
+      if (area < bestArea) {
+        bestArea = area;
+        bestId = section.id;
+      }
+    }
+    return bestId;
+  }
+
   static Color _seatColor(SeatModel s, bool isSelected) {
     if (isSelected) return const Color(0xFF3b82f6);
     switch (s.status) {
@@ -383,23 +448,106 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
     }
   }
 
+  Rect? _focusedContentRect() {
+    final id = widget.focusedSectionId;
+    if (id == null || id.isEmpty) return null;
+    SectionModel? section;
+    for (final item in widget.sections) {
+      if (item.id == id) {
+        section = item;
+        break;
+      }
+    }
+    if (section == null) return null;
+    var minX = double.infinity;
+    var minY = double.infinity;
+    var maxX = double.negativeInfinity;
+    var maxY = double.negativeInfinity;
+    void includeDataPoint(double x, double y) {
+      final childX = _kPadding + (x - _minX);
+      final childY = _kPadding + (y - _minY);
+      minX = math.min(minX, childX);
+      minY = math.min(minY, childY);
+      maxX = math.max(maxX, childX);
+      maxY = math.max(maxY, childY);
+    }
+    final polygon = _transformedSectionPolygons[section.id] ?? const <Offset>[];
+    for (final point in polygon) {
+      includeDataPoint(point.dx, point.dy);
+    }
+    final name = section.name.trim().toLowerCase();
+    final sectionId = section.id.trim().toLowerCase();
+    for (final seat in widget.seats) {
+      final key = (seat.section ?? '').trim().toLowerCase();
+      if (key.isEmpty || (key != name && key != sectionId)) continue;
+      final pos = _seatPositions[seat.placeId];
+      if (pos == null) continue;
+      includeDataPoint(pos.dx, pos.dy);
+    }
+    if (minX == double.infinity) return null;
+    const pad = 36.0;
+    return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+  }
+
   void _applyInitialFit(double viewportW, double viewportH) {
     if (_initialFitApplied || _contentWidth <= 0 || _contentHeight <= 0) return;
+    if (viewportW <= 0 || viewportH <= 0) return;
     _initialFitApplied = true;
-    final fitWidthScale = (viewportW / _contentWidth) * 0.98;
-    final fitHeightScale = (viewportH / _contentHeight) * 0.95;
+    final focus = _focusedContentRect();
+    final rect = focus ?? Rect.fromLTWH(0, 0, _contentWidth, _contentHeight);
+    final fitWidthScale = (viewportW / rect.width) * 0.98;
+    final fitHeightScale = (viewportH / rect.height) * 0.95;
+    final isTallMap = (rect.height / rect.width) > 1.25;
+    final scale = focus != null
+        ? math.min(fitWidthScale, fitHeightScale)
+        : (isTallMap ? fitWidthScale : math.min(fitWidthScale, fitHeightScale));
+    final displayW = scale * rect.width;
+    final displayH = scale * rect.height;
+    final tx = (viewportW - displayW) / 2 - rect.left * scale;
+    final ty = focus == null
+        ? (displayH > viewportH ? 8.0 : (viewportH - displayH) / 2)
+        : (viewportH - displayH) / 2 - rect.top * scale;
+    final matrix = Matrix4.diagonal3Values(scale, scale, 1.0);
+    matrix.setTranslationRaw(tx, ty, 0.0);
+    _ctrl.value = matrix;
+    if (focus == null && (_overviewScale == null || (_overviewScale! - scale).abs() > 0.0001)) {
+      setState(() => _overviewScale = scale);
+    }
+  }
 
-    // For tall maps, fit by width (larger seats, preserved row spacing) and allow vertical pan.
-    final isTallMap = (_contentHeight / _contentWidth) > 1.25;
-    final scale = isTallMap ? fitWidthScale : math.min(fitWidthScale, fitHeightScale);
+  bool get _sectionOpen =>
+      widget.focusedSectionId != null && widget.focusedSectionId!.isNotEmpty;
 
-    final displayW = scale * _contentWidth;
-    final displayH = scale * _contentHeight;
-    final tx = (viewportW - displayW) / 2;
-    final ty = displayH > viewportH ? 8.0 : (viewportH - displayH) / 2;
-    _ctrl.value = Matrix4.identity()
-      ..scale(scale)
-      ..translate(tx / scale, ty / scale);
+  double _curtainOpacity() {
+    final overview = _overviewScale;
+    if (overview == null || overview <= 0) return _sectionOpen ? 0 : 1;
+    final relativeZoom = viewScaleOf(_ctrl.value) / overview;
+    return curtainOpacityForZoom(relativeZoom: relativeZoom, sectionOpen: _sectionOpen);
+  }
+
+  double _pointTx(double x) => _kPadding + (x - _minX);
+  double _pointTy(double y) => _kPadding + (y - _minY);
+
+  bool _sectionHasSeatDots(SectionModel section) {
+    final String name = section.name.trim().toLowerCase();
+    final String id = section.id.trim().toLowerCase();
+    for (final SeatModel seat in widget.seats) {
+      final String key = (seat.section ?? '').trim().toLowerCase();
+      if (_sectionKeyMatches(name, key) || _sectionKeyMatches(id, key)) return true;
+    }
+    return false;
+  }
+
+  bool _sectionKeyMatches(String sectionKey, String seatKey) {
+    if (sectionKey.isEmpty || seatKey.isEmpty) return false;
+    return sectionKey == seatKey ||
+        sectionKey.contains(seatKey) ||
+        seatKey.contains(sectionKey);
+  }
+
+  bool _sectionCanOpen(SectionModel section) {
+    if (section.isInactiveAreaHighlight) return false;
+    return _sectionHasSeatDots(section);
   }
 
   @override
@@ -416,10 +564,13 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _applyInitialFit(vw, vh);
         });
+        final double overview = _overviewScale ?? viewScaleOf(_ctrl.value);
+        final double minScale = math.max(0.001, overview * 0.92);
+        final double maxScale = math.max(minScale * 4, math.max(12, overview * 24));
         return InteractiveViewer(
           transformationController: _ctrl,
-          minScale: 0.1,
-          maxScale: 10,
+          minScale: minScale,
+          maxScale: maxScale,
           panEnabled: true,
           scaleEnabled: true,
           constrained: false,
@@ -429,6 +580,11 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
             onTapUp: (details) {
+              if (_curtainOpacity() > 0.45) {
+                final sectionId = _hitSection(details.localPosition);
+                if (sectionId != null) widget.onSectionTap?.call(sectionId);
+                return;
+              }
               final seat = _hitSeat(details.localPosition);
               if (seat != null) widget.onSeatTap(seat);
             },
@@ -441,12 +597,16 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
                   selectedPlaceIds: widget.selectedPlaceIds.toSet(),
                   tx: _tx,
                   ty: _ty,
-                  pointTx: (x) => _kPadding + (x - _minX),
-                  pointTy: (y) => _kPadding + (y - _minY),
+                  pointTx: _pointTx,
+                  pointTy: _pointTy,
                   sections: widget.sections,
                   transformedSectionPolygons: _transformedSectionPolygons,
+                  focusedSectionId: widget.focusedSectionId,
+                  sectionHasSeatDots: _sectionHasSeatDots,
                   seatRadius: _seatRadius,
                   seatColor: _seatColor,
+                  transform: _ctrl,
+                  overviewScale: _overviewScale,
                 ),
               ),
             ),
@@ -455,6 +615,27 @@ class _SeatMapCanvasState extends State<SeatMapCanvas> {
       },
     );
   }
+}
+
+bool _polygonContains(Offset point, List<Offset> polygon) {
+  var inside = false;
+  for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    final pi = polygon[i];
+    final pj = polygon[j];
+    final crosses = (pi.dy > point.dy) != (pj.dy > point.dy);
+    if (!crosses) continue;
+    final xAtY = (pj.dx - pi.dx) * (point.dy - pi.dy) / (pj.dy - pi.dy) + pi.dx;
+    if (point.dx < xAtY) inside = !inside;
+  }
+  return inside;
+}
+
+double _polygonArea(List<Offset> polygon) {
+  var sum = 0.0;
+  for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    sum += (polygon[j].dx + polygon[i].dx) * (polygon[j].dy - polygon[i].dy);
+  }
+  return sum.abs() / 2;
 }
 
 class _SeatMapPainter extends CustomPainter {
@@ -467,9 +648,14 @@ class _SeatMapPainter extends CustomPainter {
     required this.pointTy,
     required this.sections,
     required this.transformedSectionPolygons,
+    required this.focusedSectionId,
+    required this.sectionHasSeatDots,
     required this.seatRadius,
     required this.seatColor,
-  });
+    required TransformationController transform,
+    required this.overviewScale,
+  })  : _transform = transform,
+        super(repaint: transform);
 
   final List<SeatModel> seats;
   final Set<String> selectedPlaceIds;
@@ -481,9 +667,22 @@ class _SeatMapPainter extends CustomPainter {
   final Color Function(SeatModel, bool isSelected) seatColor;
   final List<SectionModel> sections;
   final Map<String, List<Offset>> transformedSectionPolygons;
+  final String? focusedSectionId;
+  final bool Function(SectionModel section) sectionHasSeatDots;
+  final TransformationController _transform;
+  final double? overviewScale;
+
+  double get _curtainOpacity {
+    final sectionOpen = focusedSectionId != null && focusedSectionId!.isNotEmpty;
+    final overview = overviewScale;
+    if (overview == null || overview <= 0) return sectionOpen ? 0 : 1;
+    final relativeZoom = viewScaleOf(_transform.value) / overview;
+    return curtainOpacityForZoom(relativeZoom: relativeZoom, sectionOpen: sectionOpen);
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
+    final curtainOpacity = _curtainOpacity;
     final sortedSections = [...sections]..sort((a, b) {
         final ai = a.isInactiveAreaHighlight ? 0 : 1;
         final bi = b.isInactiveAreaHighlight ? 0 : 1;
@@ -492,33 +691,123 @@ class _SeatMapPainter extends CustomPainter {
       });
 
     for (final section in sortedSections) {
-      if (section.selectionMode != 'area') continue;
-
-      final pts = transformedSectionPolygons[section.id];
-      if (pts == null || pts.length < 3) continue;
-
-      final path = Path()
-        ..moveTo(pointTx(pts.first.dx), pointTy(pts.first.dy));
-      for (var i = 1; i < pts.length; i++) {
-        path.lineTo(pointTx(pts[i].dx), pointTy(pts[i].dy));
-      }
-      path.close();
-
-      final inactive = section.isInactiveAreaHighlight;
-      final fillPaint = Paint()
-        ..color = sectionColorWithOpacity(section.color, inactive ? 0.07 : 0.11)
-        ..style = PaintingStyle.fill;
-      canvas.drawPath(path, fillPaint);
-
-      final strokePaint = Paint()
-        ..color = inactive
-            ? const Color(0xFF6b7280)
-            : sectionColorWithOpacity(section.color, 0.88)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = inactive ? 1.2 : 1.6;
-      canvas.drawPath(path, strokePaint);
+      if (_isCurtainSection(section)) continue;
+      _paintSectionBody(canvas, section);
     }
 
+    if (curtainOpacity < 0.98) {
+      _paintSeats(canvas, 1 - curtainOpacity);
+    }
+    if (curtainOpacity > 0.02) {
+      for (var index = 0; index < sections.length; index++) {
+        final section = sections[index];
+        if (!_isCurtainSection(section)) continue;
+        _paintCurtain(canvas, section, index, curtainOpacity);
+      }
+    }
+    if (curtainOpacity < 0.45) _paintRowLabels(canvas);
+  }
+
+  bool _isCurtainSection(SectionModel section) {
+    if (!sectionHasSeatDots(section)) return false;
+    if (section.isInactiveAreaHighlight) return false;
+    return true;
+  }
+
+  Path? _sectionPath(SectionModel section) {
+    final pts = transformedSectionPolygons[section.id];
+    if (pts == null || pts.length < 3) return null;
+    final path = Path()..moveTo(pointTx(pts.first.dx), pointTy(pts.first.dy));
+    for (var i = 1; i < pts.length; i++) {
+      path.lineTo(pointTx(pts[i].dx), pointTy(pts[i].dy));
+    }
+    path.close();
+    return path;
+  }
+
+  void _paintSectionBody(Canvas canvas, SectionModel section) {
+    final path = _sectionPath(section);
+    if (path == null) return;
+    final hasSeats = sectionHasSeatDots(section);
+    final isArea = section.selectionMode == 'area' && !hasSeats;
+    final isField = !hasSeats && !isArea;
+    final inactive = isArea && section.isInactiveAreaHighlight;
+    final fillOpacity = isField
+        ? 0.16
+        : inactive
+            ? 0.07
+            : hasSeats
+                ? 0.04
+                : 0.11;
+    final fillPaint = Paint()
+      ..color = isField
+          ? const Color(0xFF1e3a5f).withValues(alpha: fillOpacity)
+          : sectionColorWithOpacity(section.color, fillOpacity)
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(path, fillPaint);
+    final strokePaint = Paint()
+      ..color = inactive
+          ? const Color(0xFF6b7280)
+          : sectionColorWithOpacity(section.color, 0.9)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = inactive ? 1.2 : 1.6;
+    canvas.drawPath(path, strokePaint);
+  }
+
+  void _paintCurtain(Canvas canvas, SectionModel section, int index, double opacity) {
+    final path = _sectionPath(section);
+    final pts = transformedSectionPolygons[section.id];
+    if (path == null || pts == null) return;
+    final fill = _kCurtainColors[index % _kCurtainColors.length].withValues(alpha: 0.94 * opacity);
+    canvas.drawPath(path, Paint()..color = fill..style = PaintingStyle.fill);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.white.withValues(alpha: opacity)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.4,
+    );
+    _paintCurtainLabel(canvas, pts, section.name, opacity);
+  }
+
+  void _paintCurtainLabel(Canvas canvas, List<Offset> pts, String name, double opacity) {
+    final label = name.trim();
+    if (label.isEmpty || opacity < 0.08) return;
+    var minX = double.infinity;
+    var minY = double.infinity;
+    var maxX = double.negativeInfinity;
+    var maxY = double.negativeInfinity;
+    for (final point in pts) {
+      final x = pointTx(point.dx);
+      final y = pointTy(point.dy);
+      minX = math.min(minX, x);
+      minY = math.min(minY, y);
+      maxX = math.max(maxX, x);
+      maxY = math.max(maxY, y);
+    }
+    final width = math.max(maxX - minX, 1);
+    final height = math.max(maxY - minY, 1);
+    final fitted = (width * 0.72) / math.max(label.length * 0.62, 1);
+    final double fontSize = math.max(14.0, math.min(fitted, math.min(height * 0.28, 72.0)));
+    final painter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: opacity),
+          fontSize: fontSize,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.center,
+    )..layout(maxWidth: width * 0.9);
+    painter.paint(
+      canvas,
+      Offset((minX + maxX) / 2 - painter.width / 2, (minY + maxY) / 2 - painter.height / 2),
+    );
+  }
+
+  void _paintSeats(Canvas canvas, double visibility) {
     final orderedSeats = [...seats]
       ..sort((a, b) {
         int priority(SeatModel seat) {
@@ -535,19 +824,62 @@ class _SeatMapPainter extends CustomPainter {
       var color = seatColor(s, isSelected);
       final isWheelchair = s.tags.contains('wheelchair');
       if (s.status == SeatStatus.sold || s.status == SeatStatus.reserved) {
-        color = color.withOpacity(0.5);
+        color = color.withValues(alpha: 0.5);
       }
+      color = color.withValues(alpha: color.a * visibility);
       final paint = Paint()
         ..color = color
         ..style = PaintingStyle.fill;
       canvas.drawCircle(Offset(x, y), seatRadius, paint);
       if (isSelected || isWheelchair) {
         final stroke = Paint()
-          ..color = isWheelchair ? const Color(0xFF9333ea) : Colors.white
+          ..color = (isWheelchair ? const Color(0xFF9333ea) : Colors.white).withValues(alpha: visibility)
           ..style = PaintingStyle.stroke
           ..strokeWidth = seatRadius * 0.4;
         canvas.drawCircle(Offset(x, y), seatRadius, stroke);
       }
+    }
+  }
+
+  void _paintRowLabels(Canvas canvas) {
+    final focusId = focusedSectionId;
+    if (focusId == null || focusId.isEmpty) return;
+    SectionModel? section;
+    for (final item in sections) {
+      if (item.id == focusId) {
+        section = item;
+        break;
+      }
+    }
+    if (section == null) return;
+    final name = section.name.trim().toLowerCase();
+    final id = section.id.trim().toLowerCase();
+    final firstByRow = <String, Offset>{};
+    for (final seat in seats) {
+      final key = (seat.section ?? '').trim().toLowerCase();
+      final row = seat.row;
+      if (row == null || row.isEmpty) continue;
+      if (key.isEmpty || (key != name && key != id)) continue;
+      final point = Offset(tx(seat), ty(seat));
+      final existing = firstByRow[row];
+      if (existing == null || point.dx < existing.dx) {
+        firstByRow[row] = point;
+      }
+    }
+    final style = TextStyle(
+      color: const Color(0xFF111827),
+      fontSize: math.max(12, seatRadius * 1.6),
+      fontWeight: FontWeight.w700,
+    );
+    for (final entry in firstByRow.entries) {
+      final painter = TextPainter(
+        text: TextSpan(text: entry.key, style: style),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      painter.paint(
+        canvas,
+        Offset(entry.value.dx - seatRadius - 8 - painter.width, entry.value.dy - painter.height / 2),
+      );
     }
   }
 
@@ -557,13 +889,15 @@ class _SeatMapPainter extends CustomPainter {
         oldDelegate.selectedPlaceIds != selectedPlaceIds ||
         oldDelegate.seatRadius != seatRadius ||
         oldDelegate.sections != sections ||
+        oldDelegate.focusedSectionId != focusedSectionId ||
+        oldDelegate.overviewScale != overviewScale ||
         oldDelegate.transformedSectionPolygons != transformedSectionPolygons;
   }
 }
 
 Color sectionColorWithOpacity(String hexColor, double opacity) {
   final hex = hexColor.replaceAll('#', '').trim();
-  if (hex.length != 6) return Colors.blue.withOpacity(opacity);
+  if (hex.length != 6) return Colors.blue.withValues(alpha: opacity);
   final val = int.parse(hex, radix: 16);
   final r = (val >> 16) & 0xFF;
   final g = (val >> 8) & 0xFF;

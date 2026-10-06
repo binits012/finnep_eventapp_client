@@ -40,7 +40,44 @@ String sanitizeCmsHtml(String html) {
   s = s.replaceAll(RegExp(r'<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>', caseSensitive: false), '');
   s = s.replaceAll(RegExp(r'\s*on\w+\s*=\s*("[^"]*"|[^\s>]+)', caseSensitive: false), '');
   s = s.replaceAll(RegExp(r'javascript:', caseSensitive: false), '');
+  s = _normalizeQuillBulletLists(s);
   return s;
+}
+
+String _normalizeQuillBulletLists(String html) {
+  // Quill serializes bullet lists as <ol><li data-list="bullet">...</li></ol>.
+  // Convert pure bullet blocks to <ul> so non-Quill renderers show bullets.
+  return html.replaceAllMapped(
+    RegExp(r'<ol\b([^>]*)>([\s\S]*?)<\/ol>', caseSensitive: false),
+    (match) {
+      final attrs = match.group(1) ?? '';
+      final inner = match.group(2) ?? '';
+      final hasBulletItems = RegExp(
+        "<li\\b[^>]*\\sdata-list=[\"']bullet[\"'][^>]*>",
+        caseSensitive: false,
+      ).hasMatch(inner);
+      final hasOrderedItems = RegExp(
+        "<li\\b[^>]*\\sdata-list=[\"']ordered[\"'][^>]*>",
+        caseSensitive: false,
+      ).hasMatch(inner);
+
+      if (!hasBulletItems || hasOrderedItems) {
+        return match.group(0) ?? '';
+      }
+
+      final normalizedInner = inner
+          .replaceAll(RegExp("\\sdata-list=[\"'][^\"']*[\"']", caseSensitive: false), '')
+          .replaceAll(
+            RegExp(
+              "<span\\b[^>]*class=[\"'][^\"']*\\bql-ui\\b[^\"']*[\"'][^>]*><\\/span>",
+              caseSensitive: false,
+            ),
+            '',
+          );
+
+      return '<ul$attrs>$normalizedInner</ul>';
+    },
+  );
 }
 
 bool hasRenderableRichNotificationHtml(String html) {

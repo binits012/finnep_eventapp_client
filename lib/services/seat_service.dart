@@ -1,14 +1,28 @@
 import '../models/seat.dart';
+import '../utils/money.dart';
 import '../utils/place_id_decoder.dart';
 import '../utils/ticket_pricing.dart';
 import 'api_client.dart';
 
-Future<SeatMapData> getEventSeats(String eventId) async {
-  final response = await apiGet('/event/$eventId/seats');
+Future<SeatMapData> getEventSeats(
+  String eventId, {
+  String? email,
+  String? sessionId,
+  String? checkoutToken,
+}) async {
+  final query = <String, String>{
+    if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+    if (sessionId != null && sessionId.trim().isNotEmpty)
+      'sessionId': sessionId.trim(),
+    if (checkoutToken != null && checkoutToken.trim().isNotEmpty)
+      'checkoutToken': checkoutToken.trim(),
+  };
+  final suffix = query.isEmpty ? '' : '?${Uri(queryParameters: query).query}';
+  final response = await apiGet('/event/$eventId/seats$suffix');
   throwIfNotOk(response);
   final body = parseJsonBody(response);
   if (body == null) throw ApiException(500, 'Empty response');
-  // Backend returns { data: { placeIds, sold, reserved, sections, ... } }
+  // Backend returns { data: { placeIds, sold, reserved, ownReserved, sections, ... } }
   final data = body['data'] as Map<String, dynamic>? ?? body;
   return SeatMapData.fromJson(data);
 }
@@ -38,10 +52,10 @@ Future<void> releaseSeats(
   List<String> placeIds,
   String sessionId,
 ) async {
-  final response = await apiPost('/event/$eventId/seats/release', body: {
-    'placeIds': placeIds,
-    'sessionId': sessionId,
-  });
+  final response = await apiPost(
+    '/event/$eventId/seats/release',
+    body: {'placeIds': placeIds, 'sessionId': sessionId},
+  );
   throwIfNotOk(response);
 }
 
@@ -59,7 +73,8 @@ Future<void> sendSeatOtp(
   }
   final body = <String, dynamic>{
     'email': email,
-    if (fullName != null && fullName.trim().isNotEmpty) 'fullName': fullName.trim(),
+    if (fullName != null && fullName.trim().isNotEmpty)
+      'fullName': fullName.trim(),
     if (placeIds != null && placeIds.isNotEmpty) 'placeIds': placeIds,
     if (sectionSelections != null && sectionSelections.isNotEmpty)
       'sectionSelections': sectionSelections,
@@ -82,11 +97,24 @@ Future<void> verifySeatOtp(
     if (sectionSelections != null && sectionSelections.isNotEmpty)
       'sectionSelections': sectionSelections,
   };
-  final response = await apiPost('/event/$eventId/seats/verify-otp', body: body);
+  final response = await apiPost(
+    '/event/$eventId/seats/verify-otp',
+    body: body,
+  );
   throwIfNotOk(response);
 }
 
-double _round3(double v) => (v * 1000).round() / 1000.0;
+Future<bool> checkSeatEmailTrust(String eventId, String email) async {
+  final response = await apiPost(
+    '/event/$eventId/seats/check-email-trust',
+    body: {'email': email},
+  );
+  throwIfNotOk(response);
+  final json = parseJsonBody(response);
+  final data = json?['data'];
+  if (data is Map) return data['trusted'] == true;
+  return json?['trusted'] == true;
+}
 
 int _statusPriority(SeatStatus status) {
   switch (status) {
@@ -102,6 +130,7 @@ int _statusPriority(SeatStatus status) {
 List<SeatModel> decodeSeats(SeatMapData data) {
   final soldSet = data.sold.toSet();
   final reservedSet = data.reserved.toSet();
+  final ownReservedSet = data.ownReserved.toSet();
   final byPlaceId = <String, SeatModel>{};
   // Prefer tier over zone (match web: Base 27 + Tax 3.645 = 30.645)
   for (var i = 0; i < data.placeIds.length; i++) {
@@ -109,7 +138,9 @@ List<SeatModel> decodeSeats(SeatMapData data) {
     final decoded = decodePlaceId(placeId);
     if (decoded == null) continue;
     var status = SeatStatus.available;
-    if (!decoded.available) {
+    if (ownReservedSet.contains(placeId)) {
+      status = SeatStatus.available;
+    } else if (!decoded.available) {
       status = SeatStatus.sold;
     } else if (soldSet.contains(placeId)) {
       status = SeatStatus.sold;
@@ -137,11 +168,12 @@ List<SeatModel> decodeSeats(SeatMapData data) {
           serviceFee: tier.serviceFee,
           orderFee: 0,
         );
-        basePrice = _round3(tier.basePrice);
-        taxAmount = _round3(breakdown.subtotalPerTicket - tier.basePrice);
-        final feeInclTax = breakdown.totalPerTicket - breakdown.subtotalPerTicket;
-        serviceFeeAmount = feeInclTax > 0 ? _round3(feeInclTax) : null;
-        price = _round3(breakdown.totalPerTicket);
+        basePrice = roundMoney(tier.basePrice);
+        taxAmount = roundMoney(breakdown.vatAmountPerTicket);
+        final feeInclTax =
+            breakdown.serviceFeeTaxAmount + breakdown.serviceFeeAmount;
+        serviceFeeAmount = feeInclTax > 0 ? roundMoney(feeInclTax) : null;
+        price = roundMoney(breakdown.totalPerTicket);
       }
     }
     // 2) Fall back to zone if no tier match
@@ -173,7 +205,9 @@ List<SeatModel> decodeSeats(SeatMapData data) {
     } else {
       final currentPriority = _statusPriority(existing.status);
       final nextPriority = _statusPriority(nextSeat.status);
-      byPlaceId[placeId] = nextPriority >= currentPriority ? nextSeat : existing;
+      byPlaceId[placeId] = nextPriority >= currentPriority
+          ? nextSeat
+          : existing;
     }
   }
   return byPlaceId.values.toList();
